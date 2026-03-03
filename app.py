@@ -1236,6 +1236,152 @@ class DataManager:
 
         return list(results.values())
 
+    # ── 휴가 자동 배정: 미리보기 / 해결방안 / 확정 ─────────────────────────
+
+    def _generate_suggestion(self, name, period, group, error_msg):
+        """실패 사유 분석 후 맞춤형 해결 방안 텍스트 반환."""
+        period_turns = sorted(
+            VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
+            key=lambda x: int(x.replace('턴', ''))
+        )
+        if name not in self.df.index:
+            return "스케줄에 등록되지 않은 인턴입니다."
+
+        has_any, all_jinro = False, True
+        avail = []
+        for t in period_turns:
+            if t not in self.df.columns:
+                continue
+            val = self.df.loc[name, t]
+            if not val or str(val) in ('None', '', 'nan'):
+                continue
+            has_any = True
+            loc, dept = self.parse_cell(val)
+            loc = loc or DEFAULT_LOCATION
+            if dept and '진로탐색' not in dept:
+                all_jinro = False
+                avail.append((t, dept, loc))
+
+        if not has_any:
+            return f"{period} 기간에 배치된 턴이 없습니다. 스케줄 확인이 필요합니다."
+        if all_jinro:
+            return (f"{period} 기간의 모든 턴이 진로탐색입니다. "
+                    "턴 교환을 통해 해당 기간에 다른 과목을 확보해야 합니다.")
+        if error_msg and '최소 2개 필요' in error_msg:
+            td = 'IM' if group == 'A' else 'EMC'
+            return (f"{td} 배치가 1개뿐이라 휴가로 사용 불가합니다. "
+                    f"C그룹(기타 분당/파견)으로 배정하거나, "
+                    f"턴 교환으로 {td} 배치를 늘릴 수 있습니다.")
+        if error_msg and '배치 턴이 없습니다' in error_msg:
+            tl = {'A': 'IM', 'B': 'EMC', 'C': '기타 분당/파견'}.get(group, '')
+            owned = [f"{t}({d})" for t, d, _ in avail]
+            if owned:
+                return (f"{period}에 {tl} 턴이 없습니다. "
+                        f"보유 턴: {', '.join(owned[:4])}. "
+                        "턴 교환 또는 다른 그룹 수동 배정을 고려하세요.")
+            return f"{period}에 {tl} 턴이 없습니다. 턴 교환을 통해 해결할 수 있습니다."
+        return "수동 배정 또는 턴 교환을 통해 해결할 수 있습니다."
+
+    def preview_vacation_assignments(self):
+        """
+        전체 인턴 휴가 자동 배정 미리보기 (저장 안 함).
+        모든 그룹(A→B→C) 시도 결과 수집, 실패 시 사유+해결 제안 포함.
+        """
+        from datetime import datetime as _dt
+        GROUP_LABELS = {'A': 'IM', 'B': 'EMC', 'C': 'IM·EMC외 분당/파견'}
+
+        # ── 1단계: 각 인턴×기간 별 (턴, 그룹) 결정 ───────────────
+        slot_map = {'1차': {}, '2차': {}}
+        intern_asgn = {}
+
+        for name in self.df.index:
+            intern_asgn[name] = {}
+            for period in ('1차', '2차'):
+                found = False
+                tried = []
+                for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
+                    t, dept, err = self.auto_derive_vacation_turn(name, period, group)
+                    if t:
+                        slot_map[period].setdefault((t, prefix), []).append((name, dept))
+                        intern_asgn[name][period] = {
+                            'status': 'ok', 'turn': t, 'dept': dept,
+                            'group': prefix, 'vac_type': None, 'week': None,
+                            'tried_groups': [],
+                        }
+                        found = True
+                        break
+                    else:
+                        tried.append({
+                            'group': group,
+                            'group_label': GROUP_LABELS[group],
+                            'error': err or '',
+                            'suggestion': self._generate_suggestion(name, period, group, err),
+                        })
+                if not found:
+                    intern_asgn[name][period] = {
+                        'status': 'fail', 'turn': None, 'dept': None,
+                        'group': None, 'vac_type': None, 'week': None,
+                        'tried_groups': tried,
+                    }
+
+        # ── 2단계: 주차 배정 ─────────────────────────────────────
+        for period, groups in slot_map.items():
+            for (turn, prefix), interns in groups.items():
+                for idx, (name, dept) in enumerate(interns):
+                    week = (idx % 4) + 1
+                    vac_type = f"{prefix}{week}"
+                    a = intern_asgn[name][period]
+                    if a['status'] == 'ok':
+                        a['vac_type'] = vac_type
+                        a['week'] = week
+
+        # ── 3단계: 결과 정리 ─────────────────────────────────────
+        results = []
+        ok_c = partial_c = fail_c = 0
+        for name in self.df.index:
+            entry = {'name': name, 'periods': intern_asgn[name]}
+            results.append(entry)
+            p1 = intern_asgn[name].get('1차', {}).get('status') == 'ok'
+            p2 = intern_asgn[name].get('2차', {}).get('status') == 'ok'
+            if p1 and p2:
+                ok_c += 1
+            elif p1 or p2:
+                partial_c += 1
+            else:
+                fail_c += 1
+
+        return {
+            'timestamp': _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            'results': results,
+            'slot_map': {p: {f"{t}_{pf}": [(n, d) for n, d in v]
+                             for (t, pf), v in g.items()}
+                         for p, g in slot_map.items()},
+            'summary': {
+                'total': len(results), 'ok_count': ok_c,
+                'partial_count': partial_c, 'fail_count': fail_c,
+            }
+        }
+
+    def apply_vacation_preview(self, preview_data):
+        """미리보기 결과 중 status='ok'인 항목만 실제 저장."""
+        results = {r['name']: {'name': r['name'], 'success': [], 'errors': []}
+                   for r in preview_data['results']}
+        for entry in preview_data['results']:
+            name = entry['name']
+            for period in ('1차', '2차'):
+                pd_ = entry['periods'].get(period, {})
+                if pd_.get('status') != 'ok' or not pd_.get('vac_type'):
+                    if pd_.get('status') == 'fail':
+                        results[name]['errors'].append(
+                            f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
+                    continue
+                ok, msg = self.set_intern_vacation(name, period, pd_['vac_type'])
+                if ok:
+                    results[name]['success'].append(msg)
+                else:
+                    results[name]['errors'].append(msg)
+        return list(results.values())
+
     def sync_vacation_sheet(self):
         """
         이미 존재하는 VACATION_SHEET_NAME 시트에서
@@ -1665,6 +1811,8 @@ if 'mkt_form_version' not in st.session_state:
     st.session_state.mkt_form_version = 0
 if 'mkt_post_success' not in st.session_state:
     st.session_state.mkt_post_success = ''
+if 'vacation_preview' not in st.session_state:
+    st.session_state.vacation_preview = None
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
 if 'user_id' not in st.session_state:
@@ -2001,33 +2149,147 @@ if user == 'ADMIN':
             vac_df = pd.DataFrame(vac_rows)
             st.dataframe(vac_df, use_container_width=True, hide_index=True)
 
+            # ── 휴가 배정 통계 ──────────────────────────────────────────────
+            st.markdown("##### 📊 휴가 배정 통계")
+            # 턴별 / 그룹별 인원 집계
+            turn_stats = {}   # {(period, turn): count}
+            group_stats = {}  # {(period, group): count}
+            assigned_cnt = 0
+            unassigned_cnt = 0
+
+            for intern in all_interns:
+                vac = mgr.get_intern_vacation(intern)
+                for period in ('1차', '2차'):
+                    v = vac[period]
+                    if v and v.get('turn') and v.get('type'):
+                        assigned_cnt += 1
+                        t_key = (period, v['turn'])
+                        turn_stats[t_key] = turn_stats.get(t_key, 0) + 1
+                        grp = mgr.get_vacation_group(v['type'])
+                        g_key = (period, grp)
+                        group_stats[g_key] = group_stats.get(g_key, 0) + 1
+                    else:
+                        unassigned_cnt += 1
+
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                st.caption(f"배정 완료: {assigned_cnt}건 / 미배정: {unassigned_cnt}건")
+                # 턴별 인원 표
+                _ns = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
+                t_rows = []
+                for period in ('1차', '2차'):
+                    period_turns = _ns(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
+                    for t in period_turns:
+                        cnt = turn_stats.get((period, t), 0)
+                        t_rows.append({'기간': period, '턴': t, '인원': cnt})
+                if t_rows:
+                    st.markdown("**턴별 휴가 인원**")
+                    st.dataframe(pd.DataFrame(t_rows), use_container_width=True,
+                                 hide_index=True, height=320)
+
+            with sc2:
+                # 그룹별 인원 표
+                g_labels = {'A': 'A (IM)', 'B': 'B (EMC)', 'C': 'C (기타/파견)'}
+                g_rows = []
+                for period in ('1차', '2차'):
+                    for grp in ('A', 'B', 'C'):
+                        cnt = group_stats.get((period, grp), 0)
+                        g_rows.append({'기간': period, '그룹': g_labels[grp], '인원': cnt})
+                if g_rows:
+                    st.markdown("**그룹별 휴가 인원**")
+                    st.dataframe(pd.DataFrame(g_rows), use_container_width=True,
+                                 hide_index=True, height=250)
+
             st.divider()
 
-            # ── 전체 자동 배정 ─────────────────────────────────────────────────
+            # ── 전체 자동 배정 (미리보기 → 확정) ──────────────────────────────
             st.subheader("🤖 전체 자동 배정")
             st.caption(
                 "모든 인턴의 1차·2차 휴가를 자동으로 배정합니다.  \n"
-                "우선순위: **A(IM)** → **B(EMC)** → **C(기타 분당 과 또는 파견병원)**  \n"
-                "⚠️ 이미 배정된 항목도 덮어씁니다."
+                "우선순위: **A(IM)** → **B(EMC)** → **C(기타 분당/파견)**  \n"
+                "먼저 **미리보기**로 결과를 확인한 후 확정할 수 있습니다."
             )
-            if st.button("🤖 전체 자동 배정 실행", type="primary",
-                         use_container_width=True, key="adm_auto_assign_all"):
-                with st.spinner("전체 인턴 휴가 자동 배정 중..."):
-                    auto_results = mgr.auto_assign_all_vacations()
 
-                ok_count  = sum(1 for r in auto_results if not r['errors'])
-                err_count = len(auto_results) - ok_count
-                st.info(f"완료: ✅ {ok_count}명 성공 / ⚠️ {err_count}명 일부 미배정")
+            if st.session_state.vacation_preview is None:
+                # ── 미리보기 버튼 ─────────────────────────────────────────
+                if st.button("🔍 전체 자동 배정 미리보기", type="primary",
+                             use_container_width=True, key="adm_preview_all"):
+                    with st.spinner("전체 인턴 휴가 자동 배정 미리보기 중..."):
+                        preview = mgr.preview_vacation_assignments()
+                    st.session_state.vacation_preview = preview
+                    st.rerun()
+            else:
+                # ── 미리보기 결과 표시 ────────────────────────────────────
+                preview = st.session_state.vacation_preview
+                summary = preview['summary']
 
-                with st.expander("📋 배정 결과 상세", expanded=True):
-                    for r in auto_results:
-                        if r['errors']:
-                            detail = " / ".join(r['success'] + r['errors'])
-                            st.warning(f"**{r['name']}** — {detail}")
-                        else:
-                            detail = " / ".join(r['success'])
-                            st.success(f"**{r['name']}** — {detail}")
-                st.rerun()
+                # 요약 지표
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("전체 인턴", summary['total'])
+                mc2.metric("✅ 완전 배정", summary['ok_count'])
+                mc3.metric("⚠️ 부분 배정", summary['partial_count'])
+                mc4.metric("❌ 실패", summary['fail_count'])
+
+                # 배정 미리보기 표
+                st.markdown("##### 📋 배정 미리보기")
+                prev_rows = []
+                for r in preview['results']:
+                    p1 = r['periods'].get('1차', {})
+                    p2 = r['periods'].get('2차', {})
+                    prev_rows.append({
+                        '이름': r['name'],
+                        '1차 턴': p1.get('turn') or '-',
+                        '1차 과목': p1.get('dept') or '-',
+                        '1차 타입': p1.get('vac_type') or '-',
+                        '1차': '✅' if p1.get('status') == 'ok' else '❌',
+                        '2차 턴': p2.get('turn') or '-',
+                        '2차 과목': p2.get('dept') or '-',
+                        '2차 타입': p2.get('vac_type') or '-',
+                        '2차': '✅' if p2.get('status') == 'ok' else '❌',
+                    })
+                st.dataframe(pd.DataFrame(prev_rows),
+                             use_container_width=True, hide_index=True)
+
+                # 실패 상세 + 해결 방안
+                failed = [r for r in preview['results']
+                          if any(r['periods'].get(p, {}).get('status') == 'fail'
+                                 for p in ('1차', '2차'))]
+                if failed:
+                    st.markdown("##### ⚠️ 배정 실패 상세 및 해결 방안")
+                    for entry in failed:
+                        fail_ps = [p for p in ('1차', '2차')
+                                   if entry['periods'].get(p, {}).get('status') == 'fail']
+                        with st.expander(
+                            f"❌ **{entry['name']}** — {', '.join(fail_ps)} 실패",
+                            expanded=False
+                        ):
+                            for period in fail_ps:
+                                pd_ = entry['periods'][period]
+                                st.markdown(f"**{period} 실패 진단:**")
+                                for tg in pd_.get('tried_groups', []):
+                                    st.markdown(
+                                        f"- **{tg['group']}그룹 ({tg['group_label']})**: "
+                                        f"{tg['error']}")
+                                    if tg.get('suggestion'):
+                                        st.info(f"💡 **제안**: {tg['suggestion']}")
+
+                # 확정 / 취소 버튼
+                col_ok, col_cancel = st.columns(2)
+                assignable = summary['ok_count'] + summary['partial_count']
+                with col_ok:
+                    if st.button(f"✅ 확정 적용 ({assignable}명)",
+                                 type="primary", use_container_width=True,
+                                 key="adm_confirm_preview",
+                                 disabled=assignable == 0):
+                        with st.spinner("휴가 배정 확정 적용 중..."):
+                            apply_results = mgr.apply_vacation_preview(preview)
+                        st.session_state.vacation_preview = None
+                        st.rerun()
+                with col_cancel:
+                    if st.button("🔙 취소", use_container_width=True,
+                                 key="adm_cancel_preview"):
+                        st.session_state.vacation_preview = None
+                        st.rerun()
 
             st.divider()
 
@@ -2124,18 +2386,28 @@ if user == 'ADMIN':
 
             st.divider()
 
-            # ── 분당 근무 현황 ──────────────────────────────────────────────────
-            st.subheader(f"🏥 분당 근무 현황 (최소 {BUNDANG_MIN_TURNS}개)")
-            bundang_rows = []
+            # ── 필수과목 + 분당 근무 통합 현황 ──────────────────────────────────
+            st.subheader("🏥 필수과목 · 분당 근무 충족 현황")
+            compliance_rows = []
             for intern in all_interns:
+                v_ok, missing = mgr.validate_intern(intern)
                 bc = mgr.count_bundang(intern)
-                bundang_rows.append({
+                b_ok = bc >= BUNDANG_MIN_TURNS
+                compliance_rows.append({
                     '이름': intern,
-                    '분당 턴 수': bc,
-                    '상태': f"✅ 충족 ({bc}/{BUNDANG_MIN_TURNS})" if bc >= BUNDANG_MIN_TURNS
-                            else f"🚨 부족 ({bc}/{BUNDANG_MIN_TURNS})",
+                    '필수과목': '✅ 충족' if v_ok else '🚨 미충족',
+                    '누락 과목': ', '.join(sorted(missing)) if missing else '-',
+                    '분당 턴': f"{bc}개",
+                    '분당 충족': f"✅ ({bc}/{BUNDANG_MIN_TURNS})" if b_ok
+                               else f"🚨 부족 ({bc}/{BUNDANG_MIN_TURNS})",
+                    '종합': '✅' if (v_ok and b_ok) else '🚨',
                 })
-            st.dataframe(pd.DataFrame(bundang_rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(compliance_rows),
+                         use_container_width=True, hide_index=True)
+            # 요약
+            all_ok = sum(1 for r in compliance_rows if r['종합'] == '✅')
+            st.caption(f"전체 {len(compliance_rows)}명 중 **{all_ok}명** 모든 조건 충족 / "
+                       f"**{len(compliance_rows) - all_ok}명** 미충족")
 
             st.divider()
 
