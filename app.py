@@ -18,7 +18,7 @@ SHEET_TAB_NAME     = '2026년 입사 인턴 스케쥴'
 PASSWD_SHEET_NAME  = '비밀번호'
 HISTORY_SHEET_NAME = '교환이력'
 MARKET_SHEET_NAME  = '장터'
-VACATION_SHEET_NAME = '2026년 입사 인턴 스케쥴_휴가에 반영'
+VACATION_SHEET_NAME = '2026년 입사 인턴 스케쥴_휴가'
 
 ESSENTIAL_DEPTS  = {'IM', 'GS', 'OB', 'PE', '진로탐색'}
 LOCATIONS        = {'일산', '구미', '강남'}
@@ -1126,6 +1126,10 @@ class DataManager:
             loc, dept = self.parse_cell(val)
             loc = loc or DEFAULT_LOCATION
 
+            # 진로탐색 기간은 휴가 불가
+            if dept and '진로탐색' in dept:
+                continue
+
             if vac_group == 'C':
                 # IM·EMC 외 분당 과 OR 파견병원 배치 턴
                 if (loc == DEFAULT_LOCATION and dept not in ('IM', 'EMC')) or loc in LOCATIONS:
@@ -1234,9 +1238,9 @@ class DataManager:
 
     def sync_vacation_sheet(self):
         """
-        원본 스케줄 시트의 전체 구조(헤더·서브헤더·레이아웃)를 그대로 복사하고,
-        각 인턴의 휴가 배정 턴 셀만  '원래값\n타입'  (예: IM\nA1)으로 수정하여
-        VACATION_SHEET_NAME 시트에 쓴다.
+        이미 존재하는 VACATION_SHEET_NAME 시트에서
+        인턴 이름·턴 열 위치를 읽고, 휴가 배정 셀만 '과목\\n타입' 으로 덮어쓴다.
+        시트의 나머지 구조(헤더·서식 등)는 건드리지 않는다.
         반환: (ok: bool, msg: str)
         """
         if not self.sheet_connected:
@@ -1245,14 +1249,19 @@ class DataManager:
             return False, "스케줄 데이터가 없습니다."
 
         try:
-            # ── 1) 원본 시트 전체 읽기 ──────────────────────────────────────
-            src_rows = self.worksheet.get_all_values()
-            if not src_rows:
-                return False, "원본 스케줄 시트가 비어 있습니다."
+            # ── 1) 대상 시트 열기 ─────────────────────────────────────────
+            try:
+                ws = self.sh.worksheet(VACATION_SHEET_NAME)
+            except gspread.WorksheetNotFound:
+                return False, f"'{VACATION_SHEET_NAME}' 시트를 찾을 수 없습니다."
 
-            # ── 2) 헤더·이름열·턴열 위치 파악 (fetch_data_from_sheet와 동일 로직)
+            all_rows = ws.get_all_values()
+            if not all_rows:
+                return False, f"'{VACATION_SHEET_NAME}' 시트가 비어 있습니다."
+
+            # ── 2) 헤더·이름열·턴열 위치 파악 ─────────────────────────────
             header_row_idx = name_col_idx = None
-            for row_i, row in enumerate(src_rows):
+            for row_i, row in enumerate(all_rows):
                 for col_i, h in enumerate(row):
                     if '성명' in h or '이름' in h:
                         header_row_idx, name_col_idx = row_i, col_i
@@ -1260,71 +1269,72 @@ class DataManager:
                 if header_row_idx is not None:
                     break
             if header_row_idx is None:
-                return False, "원본 시트에서 '성명'/'이름' 헤더를 찾을 수 없습니다."
+                return False, f"'{VACATION_SHEET_NAME}' 시트에서 '성명'/'이름' 헤더를 찾을 수 없습니다."
 
-            header = src_rows[header_row_idx]
-            # {턴이름: 열인덱스} 매핑   예: {'1턴': 3, '2턴': 4, ...}
+            header = all_rows[header_row_idx]
+            # {턴이름: 열인덱스(0-based)}   예: {'4턴': 5, '5턴': 6, ...}
             turn_col_map = {}
             for ci, h in enumerate(header):
                 if re.search(r'\d+턴', h):
                     turn_col_map[h.strip()] = ci
 
             # ── 3) 인턴별 휴가 배정 정보 수집 ─────────────────────────────
-            # {인턴이름: {턴: vac_type}}
-            vac_map = {}
+            vac_map = {}   # {인턴이름: {턴이름: vac_type}}
             for intern in self.df.index:
                 vac = self.get_intern_vacation(intern)
-                turns_dict = {}
+                td = {}
                 for period in ('1차', '2차'):
                     v = vac[period]
                     if v and v.get('turn') and v.get('type'):
-                        turns_dict[v['turn']] = v['type']
-                if turns_dict:
-                    vac_map[intern] = turns_dict
+                        td[v['turn']] = v['type']
+                if td:
+                    vac_map[intern] = td
 
-            # ── 4) 원본 데이터 복사 + 휴가 셀만 수정 ───────────────────────
-            out_rows = []
-            modified_count = 0
+            if not vac_map:
+                return False, "배정된 휴가가 없습니다. 먼저 휴가를 배정해주세요."
 
-            for row_i, row in enumerate(src_rows):
-                new_row = list(row)  # 원본 그대로 복사
+            # ── 4) 인턴 이름 → 시트 행번호 매핑 ──────────────────────────
+            name_row_map = {}   # {인턴이름: 시트행번호(1-based)}
+            for row_i in range(header_row_idx + 1, len(all_rows)):
+                row = all_rows[row_i]
+                if name_col_idx < len(row):
+                    nm = row[name_col_idx].strip()
+                    if nm:
+                        name_row_map[nm] = row_i + 1  # gspread는 1-based
 
-                # 헤더 행 이후 데이터 행만 처리
-                if row_i > header_row_idx:
-                    # 이름 셀 읽기
-                    intern_name = ''
-                    if name_col_idx < len(row):
-                        intern_name = row[name_col_idx].strip()
+            # ── 5) 업데이트할 셀 목록 수집 ───────────────────────────────
+            cells_to_update = []   # [(row_1based, col_1based, value)]
+            for intern, turns_dict in vac_map.items():
+                sheet_row = name_row_map.get(intern)
+                if not sheet_row:
+                    continue
+                for turn_name, vac_type in turns_dict.items():
+                    ci = turn_col_map.get(turn_name)
+                    if ci is None:
+                        continue
+                    # 현재 셀 값 읽기 (원래 과목)
+                    original = ''
+                    data_row = all_rows[sheet_row - 1]  # 0-based
+                    if ci < len(data_row):
+                        original = data_row[ci].strip()
+                    top = original if original else '(미기재)'
+                    new_val = f"{top}\n{vac_type}"
+                    cells_to_update.append((sheet_row, ci + 1, new_val))  # 1-based
 
-                    if intern_name and intern_name in vac_map:
-                        for turn_name, vac_type in vac_map[intern_name].items():
-                            ci = turn_col_map.get(turn_name)
-                            if ci is None or ci >= len(new_row):
-                                continue
-                            original = new_row[ci].strip()
-                            top = original if original else '(미기재)'
-                            new_row[ci] = f"{top}\n{vac_type}"
-                            modified_count += 1
+            if not cells_to_update:
+                return False, "업데이트할 셀을 찾지 못했습니다 (인턴 이름이 시트와 일치하는지 확인)."
 
-                out_rows.append(new_row)
+            # ── 6) 일괄 셀 업데이트 (batch) ──────────────────────────────
+            # gspread batch update: 셀 객체 리스트
+            cell_list = []
+            for r, c, val in cells_to_update:
+                cell = gspread.Cell(row=r, col=c, value=val)
+                cell_list.append(cell)
 
-            # ── 5) 대상 시트 가져오기 / 생성 ──────────────────────────────
-            try:
-                ws = self.sh.worksheet(VACATION_SHEET_NAME)
-            except gspread.WorksheetNotFound:
-                ws = self.sh.add_worksheet(
-                    title=VACATION_SHEET_NAME,
-                    rows=max(len(out_rows) + 5, 50),
-                    cols=max(len(out_rows[0]) + 2, 20) if out_rows else 20
-                )
+            ws.update_cells(cell_list, value_input_option='USER_ENTERED')
 
-            # ── 6) 시트 초기화 후 일괄 쓰기 ──────────────────────────────
-            ws.clear()
-            ws.update('A1', out_rows, value_input_option='USER_ENTERED')
-
-            intern_count = len(vac_map)
             return True, (f"✅ '{VACATION_SHEET_NAME}' 시트 업데이트 완료 "
-                          f"(인턴 {intern_count}명 / 휴가 셀 {modified_count}개 반영)")
+                          f"(휴가 셀 {len(cells_to_update)}개 반영)")
 
         except Exception as e:
             return False, f"시트 업데이트 실패: {e}"
@@ -2043,6 +2053,7 @@ if user == 'ADMIN':
                             '과목': dept or '-',
                             '지역': loc or '분당',
                             '휴가 가능': (
+                                '❌ 진로탐색(불가)' if dept and '진로탐색' in dept else
                                 '✅ A타입(IM)' if dept == 'IM' else
                                 '✅ B타입(EMC)' if dept == 'EMC' else
                                 '✅ C타입(파견병원)' if loc in LOCATIONS else
