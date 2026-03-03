@@ -1390,34 +1390,79 @@ if user == 'ADMIN':
         if mgr.df.empty:
             st.warning("스케줄 데이터가 없습니다.")
         else:
-            # 1) 각 턴별 과목 인원 집계
-            st.subheader("📌 턴별 과목 배치 현황")
-            dept_matrix = {}
+            # ── 데이터 전처리: 과목·지역 분리 집계 ────────────────────────────
+            ALL_LOCS = list(LOCATIONS) + [DEFAULT_LOCATION]   # 일산,구미,강남,분당
+
+            grouped_matrix  = {}   # {턴: {과목: 인원}}  (지역 무관 합산)
+            detail_matrix   = {}   # {턴: {과목(지역): 인원}}  (지역 세분화)
+            loc_matrix      = {}   # {턴: {지역: 인원}}
+
             for col in mgr.df.columns:
-                counts = {}
+                g, d, lm = {}, {}, {}
                 for val in mgr.df[col]:
-                    if val and str(val) not in ('None', '', 'nan'):
-                        _, dept = mgr.parse_cell(val)
-                        if dept:
-                            counts[dept] = counts.get(dept, 0) + 1
-                dept_matrix[col] = counts
+                    if not val or str(val) in ('None', '', 'nan'):
+                        continue
+                    loc, dept = mgr.parse_cell(val)
+                    if not dept:
+                        continue
+                    loc = loc or DEFAULT_LOCATION
+                    # 과목 통합 (지역 무관)
+                    g[dept] = g.get(dept, 0) + 1
+                    # 과목+지역 세분화 (분당은 표시 없음으로 그대로)
+                    detail_key = f"{dept}({loc})" if loc != DEFAULT_LOCATION else dept
+                    d[detail_key] = d.get(detail_key, 0) + 1
+                    # 지역별
+                    lm[loc] = lm.get(loc, 0) + 1
+                grouped_matrix[col] = g
+                detail_matrix[col]  = d
+                loc_matrix[col]     = lm
 
-            matrix_df = pd.DataFrame(dept_matrix).fillna(0).astype(int)
-            matrix_df.index.name = '과목'
-            # 필수과목 먼저 정렬
-            priority = [d for d in sorted(ESSENTIAL_DEPTS) if d in matrix_df.index]
-            others_d = [d for d in matrix_df.index if d not in ESSENTIAL_DEPTS]
-            matrix_df = matrix_df.loc[priority + sorted(others_d)]
+            def make_sorted_df(matrix, priority_index=None):
+                df_ = pd.DataFrame(matrix).fillna(0).astype(int)
+                df_.index.name = '항목'
+                if priority_index:
+                    first = [x for x in priority_index if x in df_.index]
+                    rest  = sorted([x for x in df_.index if x not in priority_index])
+                    df_   = df_.loc[first + rest]
+                else:
+                    df_ = df_.sort_index()
+                return df_
 
+            # ── 1) 턴별 과목 배치 현황 (통합) ──────────────────────────────────
+            st.subheader("📌 턴별 과목 배치 현황 (지역 통합)")
+            gdf = make_sorted_df(grouped_matrix, priority_index=sorted(ESSENTIAL_DEPTS))
             st.dataframe(
-                matrix_df.style.background_gradient(cmap='Blues', axis=None),
-                use_container_width=True, height=400
+                gdf.style.background_gradient(cmap='Blues', axis=None),
+                use_container_width=True, height=min(80 + len(gdf) * 35, 500)
             )
-            st.caption("숫자 = 해당 턴에서 그 과목을 배치받은 인원 수. 색이 진할수록 많음.")
+            st.caption("지역(강남/일산/구미/분당) 구분 없이 동일 과목을 합산한 인원 수")
 
-            # 2) 과목별 전체 합산
-            st.subheader("📌 과목별 전체 인원 합산")
-            total_by_dept = matrix_df.sum(axis=1).sort_values(ascending=False)
+            # ── 2) 턴별 과목 배치 현황 (지역 세분화) ──────────────────────────
+            st.subheader("📌 턴별 과목 배치 현황 (지역 세분화)")
+            ddf = make_sorted_df(detail_matrix)
+            # 필수과목 계열 먼저 (IM, IM(강남), IM(일산)... 순)
+            ess_keys = sorted([k for k in ddf.index
+                               if any(k == e or k.startswith(e + '(') for e in ESSENTIAL_DEPTS)])
+            other_keys = sorted([k for k in ddf.index if k not in ess_keys])
+            ddf = ddf.loc[ess_keys + other_keys]
+            st.dataframe(
+                ddf.style.background_gradient(cmap='Greens', axis=None),
+                use_container_width=True, height=min(80 + len(ddf) * 35, 600)
+            )
+            st.caption("IM → 분당 IM / IM(강남) → 강남 IM / IM(일산) → 일산 IM / IM(구미) → 구미 IM")
+
+            # ── 3) 턴별 지역 인원 현황 ────────────────────────────────────────
+            st.subheader("📌 턴별 지역별 인원 현황")
+            ldf = make_sorted_df(loc_matrix, priority_index=['분당', '강남', '일산', '구미'])
+            st.dataframe(
+                ldf.style.background_gradient(cmap='Oranges', axis=None),
+                use_container_width=True, height=min(80 + len(ldf) * 35, 300)
+            )
+            st.caption("분당 = 지역 표시 없는 과목 / 나머지는 괄호 안 지역 기준")
+
+            # ── 4) 과목별 전체 합산 ────────────────────────────────────────────
+            st.subheader("📌 과목별 전체 인원 합산 (지역 통합)")
+            total_by_dept = gdf.sum(axis=1).sort_values(ascending=False)
             col_b1, col_b2 = st.columns([2, 1])
             with col_b1:
                 st.bar_chart(total_by_dept)
