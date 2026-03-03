@@ -18,6 +18,7 @@ SHEET_TAB_NAME     = '2026년 입사 인턴 스케쥴'
 PASSWD_SHEET_NAME  = '비밀번호'
 HISTORY_SHEET_NAME = '교환이력'
 MARKET_SHEET_NAME  = '장터'
+VACATION_SHEET_NAME = '2026년 입사 인턴 스케쥴_휴가 반영'
 
 ESSENTIAL_DEPTS  = {'IM', 'GS', 'OB', 'PE', '진로탐색'}
 LOCATIONS        = {'일산', '구미', '강남'}
@@ -1228,6 +1229,73 @@ class DataManager:
             results.append(row)
         return results
 
+    def sync_vacation_sheet(self):
+        """
+        'VACATION_SHEET_NAME' 시트에 스케줄 전체를 쓰되,
+        각 인턴의 휴가 턴 셀은  '원래값\n타입'  (예: IM\nA1) 으로 표기.
+        반환: (ok: bool, msg: str)
+        """
+        if not self.sheet_connected:
+            return False, "구글 시트에 연결되어 있지 않습니다."
+        if self.df.empty:
+            return False, "스케줄 데이터가 없습니다."
+
+        try:
+            # 시트 가져오기 or 생성
+            try:
+                ws = self.sh.worksheet(VACATION_SHEET_NAME)
+            except gspread.WorksheetNotFound:
+                ws = self.sh.add_worksheet(
+                    title=VACATION_SHEET_NAME,
+                    rows=max(len(self.df) + 5, 50),
+                    cols=max(len(self.df.columns) + 3, 20)
+                )
+
+            # 턴 컬럼을 숫자 순으로 정렬
+            def _turn_key(t):
+                m = re.search(r'\d+', str(t))
+                return int(m.group()) if m else 999
+
+            turns = sorted(self.df.columns, key=_turn_key)
+
+            # 헤더행
+            header = ['이름'] + turns
+            data   = [header]
+
+            # 인턴별 행 구성
+            for intern in self.df.index:
+                vac = self.get_intern_vacation(intern)
+                # 1차·2차 휴가 턴 dict: {turn: vac_type}
+                vac_turns = {}
+                for period in ('1차', '2차'):
+                    v = vac[period]
+                    if v and v.get('turn') and v.get('type'):
+                        vac_turns[v['turn']] = v['type']
+
+                row = [intern]
+                for turn in turns:
+                    raw = self.df.loc[intern, turn]
+                    cell_val = '' if (not raw or str(raw) in ('None', 'nan')) else str(raw).strip()
+
+                    if turn in vac_turns:
+                        # 휴가 턴: 원래값(과목) + 줄바꿈 + 타입
+                        # 셀이 비어있으면 과목명 없이 타입만
+                        top = cell_val if cell_val else '(미기재)'
+                        cell_val = f"{top}\n{vac_turns[turn]}"
+
+                    row.append(cell_val)
+                data.append(row)
+
+            # 시트 초기화 후 일괄 쓰기
+            ws.clear()
+            ws.update('A1', data, value_input_option='USER_ENTERED')
+
+            return True, (f"✅ '{VACATION_SHEET_NAME}' 시트 업데이트 완료 "
+                          f"({len(self.df)}명 / {len(turns)}턴)")
+
+        except Exception as e:
+            return False, f"시트 업데이트 실패: {e}"
+
     def validate_vacation_exchange(self, sender, receiver, turn):
         """
         turn 교환 시 휴가 규칙 검증.
@@ -2024,6 +2092,26 @@ if user == 'ADMIN':
                             else f"🚨 부족 ({bc}/{BUNDANG_MIN_TURNS})",
                 })
             st.dataframe(pd.DataFrame(bundang_rows), use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── 구글 시트 휴가반영 동기화 ──────────────────────────────────────
+            st.subheader("📤 구글 시트 업데이트")
+            st.caption(
+                f"휴가 배정 결과를 **'{VACATION_SHEET_NAME}'** 시트에 씁니다.  \n"
+                "휴가 턴 셀은 **과목↵타입** 형식으로 표기됩니다 (예: `IM↵A1`)."
+            )
+            if not mgr.sheet_connected:
+                st.warning("⚠️ 구글 시트에 연결되어 있지 않아 업데이트할 수 없습니다.")
+            else:
+                if st.button("📤 휴가반영 시트 업데이트", type="primary",
+                             use_container_width=True, key="adm_sync_vac_sheet"):
+                    with st.spinner(f"'{VACATION_SHEET_NAME}' 시트 업데이트 중..."):
+                        ok, msg = mgr.sync_vacation_sheet()
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
     st.stop()
 
