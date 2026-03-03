@@ -1232,54 +1232,42 @@ class DataManager:
 #  Streamlit UI
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(layout="wide", page_title="인턴 턴표 교환 시스템",
-                   initial_sidebar_state="collapsed")
+                   initial_sidebar_state="auto")
 
-# ── 반응형 CSS (데스크탑 + 모바일) ───────────────────────────────────────────
-st.markdown("""
+# ── 모드별 CSS ────────────────────────────────────────────────────────────────
+_PC_CSS = """
 <style>
-/* 데스크탑: 사이드바 너비 확장 */
-@media (min-width: 768px) {
-    section[data-testid="stSidebar"] {
-        width: 400px !important;
-    }
-    section[data-testid="stSidebar"] > div:first-child {
-        width: 400px !important;
-    }
-}
-
-/* 모바일: 전체 너비 활용 */
-@media (max-width: 767px) {
-    /* 메인 콘텐츠 패딩 */
-    .block-container {
-        padding-left: 0.75rem !important;
-        padding-right: 0.75rem !important;
-        padding-top: 3.5rem !important;
-        max-width: 100% !important;
-    }
-    /* 컬럼 내부 간격 줄이기 */
-    [data-testid="column"] {
-        padding: 0 2px !important;
-    }
-    /* 버튼 터치 영역 확보 */
-    .stButton > button {
-        min-height: 2.5rem;
-        font-size: 0.9rem;
-    }
-    /* 셀렉트박스 레이블 크기 */
-    .stSelectbox label, .stTextInput label {
-        font-size: 0.85rem !important;
-    }
-    /* 데이터 테이블 폰트 */
-    .stDataFrame {
-        font-size: 0.75rem;
-    }
-    /* 제목 크기 조정 */
-    h1 { font-size: 1.5rem !important; }
-    h2 { font-size: 1.2rem !important; }
-    h3 { font-size: 1.1rem !important; }
-}
+section[data-testid="stSidebar"] { width: 400px !important; }
+section[data-testid="stSidebar"] > div:first-child { width: 400px !important; }
 </style>
-""", unsafe_allow_html=True)
+"""
+
+_MOBILE_CSS = """
+<style>
+.block-container {
+    padding-left: 0.75rem !important;
+    padding-right: 0.75rem !important;
+    padding-top: 3.5rem !important;
+    max-width: 100% !important;
+}
+[data-testid="column"] { padding: 0 2px !important; }
+.stButton > button { min-height: 2.5rem; font-size: 0.9rem; }
+.stSelectbox label, .stTextInput label { font-size: 0.85rem !important; }
+.stDataFrame { font-size: 0.75rem; }
+h1 { font-size: 1.5rem !important; }
+h2 { font-size: 1.2rem !important; }
+h3 { font-size: 1.1rem !important; }
+</style>
+"""
+
+if 'layout_mode' not in st.session_state:
+    st.session_state.layout_mode = 'mobile'   # 기본값: 모바일
+
+# 선택된 모드에 따라 CSS 적용
+st.markdown(
+    _MOBILE_CSS if st.session_state.layout_mode == 'mobile' else _PC_CSS,
+    unsafe_allow_html=True
+)
 
 if 'manager' not in st.session_state:
     st.session_state.manager = DataManager()
@@ -1305,7 +1293,16 @@ if 'mkt_post_success' not in st.session_state:
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
 if 'user_id' not in st.session_state:
-    st.title("🏥 인턴 턴표 시스템 로그인")
+    # 모드 전환 버튼 (우상단)
+    _lc, _rc = st.columns([4, 1])
+    with _rc:
+        _is_mobile = st.session_state.layout_mode == 'mobile'
+        if st.button("💻 PC" if _is_mobile else "📱 모바일",
+                     use_container_width=True, key="login_mode_toggle"):
+            st.session_state.layout_mode = 'pc' if _is_mobile else 'mobile'
+            st.rerun()
+    with _lc:
+        st.title("🏥 인턴 턴표 시스템 로그인")
     if mgr.sheet_connected:
         st.success("🟢 구글 시트와 정상적으로 연결되었습니다.")
     else:
@@ -1387,12 +1384,17 @@ with st.sidebar:
                 ok, msg = mgr.update_password_in_sheet(user, new_pw)
                 st.success(msg) if ok else st.error(msg)
 
-    col_ref, col_lo = st.columns(2)
+    col_ref, col_lo, col_mode = st.columns(3)
     if col_ref.button("🔄 새로고침", use_container_width=True):
         mgr.load_db()
         st.rerun()
     if col_lo.button("🚪 로그아웃", use_container_width=True):
         del st.session_state.user_id
+        st.rerun()
+    _sb_mobile = st.session_state.layout_mode == 'mobile'
+    if col_mode.button("💻 PC" if _sb_mobile else "📱 모바일",
+                       use_container_width=True, key="sb_mode_toggle"):
+        st.session_state.layout_mode = 'pc' if _sb_mobile else 'mobile'
         st.rerun()
 
     st.divider()
