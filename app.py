@@ -24,6 +24,12 @@ LOCATIONS        = {'일산', '구미', '강남'}
 DEFAULT_LOCATION = '분당'
 LOCKED_TURNS     = {'1턴', '2턴'}   # 교환 불가 턴
 
+# ── 휴가 관련 상수 ─────────────────────────────────────────────────────────────
+VACATION_PERIOD_1  = {'4턴', '5턴', '6턴', '7턴'}   # 1차 휴가 기간
+VACATION_PERIOD_2  = {'8턴', '9턴', '10턴', '11턴'} # 2차 휴가 기간
+VACATION_TYPES     = ['A1','A2','A3','A4','B1','B2','B3','B4','단독']
+BUNDANG_MIN_TURNS  = 7   # 분당 근무 최소 턴 수 (전체 13개 중)
+
 HISTORY_HEADER = ['날짜시간', '신청자', '상대방', '교환턴',
                   '신청자값', '상대방값', '결과', '비고']
 MARKET_HEADER  = ['등록ID', '등록시각', '등록자', '주고싶은턴',
@@ -46,6 +52,7 @@ class DataManager:
         self.market_ws   = None
         self.passwords   = {}
         self.market_posts = []
+        self.vacation_data = {}   # {이름: {'1차': {'turn':X,'type':Y}, '2차': {'turn':X,'type':Y}}}
         self.connect_google_sheet()
         self.load_db()
 
@@ -995,26 +1002,33 @@ class DataManager:
             if os.path.exists(DB_FILE):
                 try:
                     with open(DB_FILE, 'r', encoding='utf-8') as f:
-                        self.requests = json.load(f).get('requests', [])
+                        db = json.load(f)
+                        self.requests     = db.get('requests', [])
+                        self.vacation_data = db.get('vacation_data', {})
                 except Exception:
-                    self.requests = []
+                    self.requests     = []
+                    self.vacation_data = {}
             else:
-                self.requests = []
+                self.requests     = []
+                self.vacation_data = {}
         else:
             if os.path.exists(DB_FILE):
                 with open(DB_FILE, 'r', encoding='utf-8') as f:
                     db = json.load(f)
-                    self.df       = pd.DataFrame(db.get('schedule', {}))
-                    self.requests = db.get('requests', [])
+                    self.df            = pd.DataFrame(db.get('schedule', {}))
+                    self.requests      = db.get('requests', [])
+                    self.vacation_data = db.get('vacation_data', {})
             else:
-                self.df       = pd.DataFrame()
-                self.requests = []
+                self.df            = pd.DataFrame()
+                self.requests      = []
+                self.vacation_data = {}
         self.save_db()
 
     def save_db(self):
         db = {
-            'schedule': json.loads(self.df.to_json(orient='columns')),
-            'requests': self.requests
+            'schedule':      json.loads(self.df.to_json(orient='columns')),
+            'requests':      self.requests,
+            'vacation_data': self.vacation_data,
         }
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, indent=4)
@@ -1048,6 +1062,129 @@ class DataManager:
                     dept_set.add(dept)
         missing = ESSENTIAL_DEPTS - dept_set
         return len(missing) == 0, missing
+
+    # ── 분당 근무 비율 검증 ────────────────────────────────────────────────────
+    def count_bundang(self, name, schedule=None):
+        """분당(기본지역) 배치 턴 수 반환"""
+        if schedule is None:
+            if name not in self.df.index:
+                return 0
+            schedule = self.df.loc[name]
+        count = 0
+        for col in self.df.columns:
+            val = schedule[col]
+            if val and str(val) not in ('None', '', 'nan'):
+                loc, _ = self.parse_cell(val)
+                if (loc or DEFAULT_LOCATION) == DEFAULT_LOCATION:
+                    count += 1
+        return count
+
+    def validate_bundang(self, name, schedule=None):
+        """분당 근무 ≥ BUNDANG_MIN_TURNS 여부"""
+        return self.count_bundang(name, schedule) >= BUNDANG_MIN_TURNS
+
+    # ── 휴가 관련 헬퍼 ────────────────────────────────────────────────────────
+    def get_vacation_group(self, vac_type):
+        """'A2' → 'A',  'B3' → 'B',  '단독' → '단독'"""
+        if str(vac_type).startswith('A'):
+            return 'A'
+        elif str(vac_type).startswith('B'):
+            return 'B'
+        return '단독'
+
+    def get_intern_vacation(self, name):
+        """인턴의 휴가 배정 정보 반환. 없으면 {'1차': None, '2차': None}"""
+        vac = self.vacation_data.get(name, {})
+        return {
+            '1차': vac.get('1차'),   # None 또는 {'turn': 'X턴', 'type': 'A2'}
+            '2차': vac.get('2차'),
+        }
+
+    def set_intern_vacation(self, name, period, turn, vac_type):
+        """
+        휴가 배정 저장.
+        period: '1차' or '2차'
+        turn  : '5턴' 등 해당 기간 내 턴
+        vac_type: 'A1'~'A4', 'B1'~'B4', '단독'
+        반환: (ok: bool, msg: str)
+        """
+        # 기간 검증
+        if period == '1차' and turn not in VACATION_PERIOD_1:
+            return False, f"1차 휴가는 {sorted(VACATION_PERIOD_1)} 중 하나여야 합니다."
+        if period == '2차' and turn not in VACATION_PERIOD_2:
+            return False, f"2차 휴가는 {sorted(VACATION_PERIOD_2)} 중 하나여야 합니다."
+        if vac_type not in VACATION_TYPES:
+            return False, f"휴가 유형이 올바르지 않습니다: {vac_type}"
+
+        # EMC/IM 규칙: 해당 턴이 IM 또는 EMC → 같은 과목이 2개 이상이어야 함
+        if name in self.df.index and turn in self.df.columns:
+            val = self.df.loc[name, turn]
+            _, dept = self.parse_cell(val) if val and str(val) not in ('None','') else (None,None)
+            if dept in ('IM', 'EMC'):
+                dept_count = sum(
+                    1 for col in self.df.columns
+                    if col != turn and
+                       (lambda v: self.parse_cell(v)[1] if v and str(v) not in ('None','') else None)(
+                           self.df.loc[name, col]) == dept
+                )
+                if dept_count < 1:   # 다른 턴에 같은 과목이 없으면 (총 1개)
+                    return False, (f"{name}의 {turn}은 {dept} 1개뿐이라 "
+                                   f"휴가로 사용할 수 없습니다 (근무일 수 부족).")
+
+        if name not in self.vacation_data:
+            self.vacation_data[name] = {}
+        self.vacation_data[name][period] = {'turn': turn, 'type': vac_type}
+        self.save_db()
+        return True, f"{name} {period} 휴가: {turn} ({vac_type}) 배정 완료"
+
+    def clear_intern_vacation(self, name, period):
+        """특정 인턴의 1차 또는 2차 휴가 배정 초기화"""
+        if name in self.vacation_data and period in self.vacation_data[name]:
+            del self.vacation_data[name][period]
+            self.save_db()
+        return True, f"{name} {period} 휴가 초기화 완료"
+
+    def validate_vacation_exchange(self, sender, receiver, turn):
+        """
+        turn 교환 시 휴가 규칙 검증.
+        반환: (ok: bool, errors: list)
+        """
+        errors = []
+        sv = self.get_intern_vacation(sender)
+        rv = self.get_intern_vacation(receiver)
+
+        for period in ('1차', '2차'):
+            s_vac = sv[period]
+            r_vac = rv[period]
+            s_in_turn = s_vac and s_vac['turn'] == turn
+            r_in_turn = r_vac and r_vac['turn'] == turn
+
+            if s_in_turn and r_in_turn:
+                # 두 사람 모두 이 턴에 휴가 → 그룹이 같아야 교환 가능
+                sg = self.get_vacation_group(s_vac['type'])
+                rg = self.get_vacation_group(r_vac['type'])
+                if sg != rg:
+                    errors.append(
+                        f"⛔ {period} 휴가 타입 불일치: "
+                        f"{sender}={s_vac['type']}({sg}그룹) vs "
+                        f"{receiver}={r_vac['type']}({rg}그룹). 같은 그룹끼리만 교환 가능합니다."
+                    )
+            elif s_in_turn and not r_in_turn:
+                # sender만 이 턴에 휴가 배정 → 교환하면 sender 휴가 사라짐
+                errors.append(
+                    f"⛔ {sender}의 {period} 휴가가 {turn}에 배정되어 있습니다. "
+                    f"이 턴을 교환하면 휴가가 사라집니다. "
+                    f"(상대방({receiver})의 {period} 휴가도 이 턴이어야 교환 가능)"
+                )
+            elif r_in_turn and not s_in_turn:
+                # receiver만 이 턴에 휴가 배정
+                errors.append(
+                    f"⛔ {receiver}의 {period} 휴가가 {turn}에 배정되어 있습니다. "
+                    f"이 턴을 교환하면 상대방 휴가가 사라집니다. "
+                    f"({sender}의 {period} 휴가도 이 턴이어야 교환 가능)"
+                )
+
+        return len(errors) == 0, errors
 
     # ── 복합 교환 사전 검증 (UI 표시용) ──────────────────────────────────────
     def validate_multi_exchange(self, sender, exchanges):
@@ -1104,6 +1241,25 @@ class DataManager:
             if not valid:
                 errors.append(f"• {name}: {', '.join(sorted(missing))} 누락")
 
+        # ── 분당 근무 비율 검증 ────────────────────────────────────────────────
+        for name, sched in temp.items():
+            bc = self.count_bundang(name, sched)
+            if bc < BUNDANG_MIN_TURNS:
+                errors.append(
+                    f"• {name}: 분당 근무 {bc}개 (최소 {BUNDANG_MIN_TURNS}개 필요)"
+                )
+
+        # ── 휴가 규칙 검증 ────────────────────────────────────────────────────
+        checked_pairs = set()
+        for ex in exchanges:
+            pair = tuple(sorted([sender, ex['target']])) + (ex['turn'],)
+            if pair in checked_pairs:
+                continue
+            checked_pairs.add(pair)
+            ok_v, v_errs = self.validate_vacation_exchange(sender, ex['target'], ex['turn'])
+            if not ok_v:
+                errors.extend(v_errs)
+
         return len(errors) == 0, errors
 
     # ── 교환 요청 (신청 시점 검증) ────────────────────────────────────────────
@@ -1131,10 +1287,17 @@ class DataManager:
         sched_b[turn] = val_a
         v1, m1 = self.validate_intern(sender,   sched_a)
         v2, m2 = self.validate_intern(receiver, sched_b)
-        if not v1 or not v2:
-            lines = ["⚠️ 필수과목 규칙 위반으로 신청 불가:"]
-            if not v1: lines.append(f"• {sender}: {', '.join(sorted(m1))} 누락")
-            if not v2: lines.append(f"• {receiver}: {', '.join(sorted(m2))} 누락")
+        b1 = self.validate_bundang(sender,   sched_a)
+        b2 = self.validate_bundang(receiver, sched_b)
+        ok_vac, vac_errs = self.validate_vacation_exchange(sender, receiver, turn)
+
+        if not v1 or not v2 or not b1 or not b2 or not ok_vac:
+            lines = ["⚠️ 규칙 위반으로 신청 불가:"]
+            if not v1: lines.append(f"• {sender}: 필수과목 {', '.join(sorted(m1))} 누락")
+            if not v2: lines.append(f"• {receiver}: 필수과목 {', '.join(sorted(m2))} 누락")
+            if not b1: lines.append(f"• {sender}: 분당 근무 {self.count_bundang(sender, sched_a)}개 (최소 {BUNDANG_MIN_TURNS}개 필요)")
+            if not b2: lines.append(f"• {receiver}: 분당 근무 {self.count_bundang(receiver, sched_b)}개 (최소 {BUNDANG_MIN_TURNS}개 필요)")
+            lines.extend(vac_errs)
             return False, "\n".join(lines)
 
         new_req = {
@@ -1381,8 +1544,8 @@ if user == 'ADMIN':
     st.title("🔐 관리자 대시보드")
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
-    adm_tab1, adm_tab2, adm_tab3, adm_tab4, adm_tab5 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리"
+    adm_tab1, adm_tab2, adm_tab3, adm_tab4, adm_tab5, adm_tab6 = st.tabs([
+        "📊 스케줄 통계", "📋 전체 스케줄", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "📅 휴가 배정"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -1616,6 +1779,121 @@ if user == 'ADMIN':
             })
         if pw_rows:
             st.dataframe(pd.DataFrame(pw_rows), use_container_width=True, hide_index=True)
+
+    # ── 관리자 탭6: 휴가 배정 ──────────────────────────────────────────────────
+    with adm_tab6:
+        st.subheader("📅 인턴 휴가 배정")
+        st.info(
+            f"**1차 휴가 기간**: {', '.join(sorted(VACATION_PERIOD_1))}  |  "
+            f"**2차 휴가 기간**: {', '.join(sorted(VACATION_PERIOD_2))}\n\n"
+            "휴가 타입: **A1~A4** (A그룹 1~4주차) / **B1~B4** (B그룹 1~4주차) / **단독** (독립)"
+        )
+
+        if mgr.df.empty:
+            st.warning("스케줄 데이터가 없습니다.")
+        else:
+            all_interns = list(mgr.df.index)
+
+            # ── 현재 배정 현황 표 ─────────────────────────────────────────────
+            st.subheader("📋 현재 휴가 배정 현황")
+            vac_rows = []
+            for intern in all_interns:
+                vac = mgr.get_intern_vacation(intern)
+                v1  = vac['1차']
+                v2  = vac['2차']
+                # 분당 근무 수도 함께 표시
+                bc  = mgr.count_bundang(intern)
+                vac_rows.append({
+                    '이름':      intern,
+                    '1차 턴':    v1['turn'] if v1 else '미배정',
+                    '1차 타입':  v1['type'] if v1 else '-',
+                    '2차 턴':    v2['turn'] if v2 else '미배정',
+                    '2차 타입':  v2['type'] if v2 else '-',
+                    '분당 근무': f"{bc}개 {'✅' if bc >= BUNDANG_MIN_TURNS else '🚨'}",
+                })
+            vac_df = pd.DataFrame(vac_rows)
+            st.dataframe(vac_df, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── 개별 배정 폼 ──────────────────────────────────────────────────
+            st.subheader("✏️ 휴가 배정 / 수정")
+            sel_vac_intern = st.selectbox("인턴 선택", all_interns, key="adm_vac_intern")
+
+            if sel_vac_intern:
+                cur_vac = mgr.get_intern_vacation(sel_vac_intern)
+
+                # 해당 인턴의 턴별 과목 표시 (배정 참고용)
+                with st.expander(f"📋 {sel_vac_intern} 스케줄 (참고)", expanded=False):
+                    sched_rows = []
+                    for col in mgr.df.columns:
+                        val = mgr.df.loc[sel_vac_intern, col] if sel_vac_intern in mgr.df.index else '-'
+                        _, dept = mgr.parse_cell(val) if val and str(val) not in ('None','') else (None,None)
+                        period_tag = ''
+                        if col in VACATION_PERIOD_1: period_tag = '(1차 기간)'
+                        elif col in VACATION_PERIOD_2: period_tag = '(2차 기간)'
+                        sched_rows.append({'턴': col + period_tag, '값': val or '-', '과목': dept or '-'})
+                    st.dataframe(pd.DataFrame(sched_rows), use_container_width=True, hide_index=True, height=300)
+
+                cv1, cv2 = st.columns(2)
+
+                # 1차 휴가
+                with cv1:
+                    st.markdown("**1차 휴가 배정**")
+                    p1_turns  = sorted(VACATION_PERIOD_1)
+                    p1_types  = VACATION_TYPES
+                    def_p1t   = cur_vac['1차']['turn'] if cur_vac['1차'] else p1_turns[0]
+                    def_p1ty  = cur_vac['1차']['type'] if cur_vac['1차'] else 'A1'
+                    p1_turn_idx  = p1_turns.index(def_p1t) if def_p1t in p1_turns else 0
+                    p1_type_idx  = p1_types.index(def_p1ty) if def_p1ty in p1_types else 0
+                    sel_p1_turn = st.selectbox("1차 휴가 턴", p1_turns,
+                                               index=p1_turn_idx, key="adm_p1_turn")
+                    sel_p1_type = st.selectbox("1차 타입", p1_types,
+                                               index=p1_type_idx, key="adm_p1_type")
+                    c_set1, c_clr1 = st.columns(2)
+                    if c_set1.button("💾 1차 저장", use_container_width=True, key="adm_vac_set1"):
+                        ok, msg = mgr.set_intern_vacation(sel_vac_intern, '1차', sel_p1_turn, sel_p1_type)
+                        if ok: st.success(msg)
+                        else:  st.error(msg)
+                    if c_clr1.button("🗑️ 1차 초기화", use_container_width=True, key="adm_vac_clr1"):
+                        ok, msg = mgr.clear_intern_vacation(sel_vac_intern, '1차')
+                        st.success(msg)
+
+                # 2차 휴가
+                with cv2:
+                    st.markdown("**2차 휴가 배정**")
+                    p2_turns  = sorted(VACATION_PERIOD_2)
+                    def_p2t   = cur_vac['2차']['turn'] if cur_vac['2차'] else p2_turns[0]
+                    def_p2ty  = cur_vac['2차']['type'] if cur_vac['2차'] else 'A1'
+                    p2_turn_idx  = p2_turns.index(def_p2t) if def_p2t in p2_turns else 0
+                    p2_type_idx  = p1_types.index(def_p2ty) if def_p2ty in p1_types else 0
+                    sel_p2_turn = st.selectbox("2차 휴가 턴", p2_turns,
+                                               index=p2_turn_idx, key="adm_p2_turn")
+                    sel_p2_type = st.selectbox("2차 타입", p1_types,
+                                               index=p2_type_idx, key="adm_p2_type")
+                    c_set2, c_clr2 = st.columns(2)
+                    if c_set2.button("💾 2차 저장", use_container_width=True, key="adm_vac_set2"):
+                        ok, msg = mgr.set_intern_vacation(sel_vac_intern, '2차', sel_p2_turn, sel_p2_type)
+                        if ok: st.success(msg)
+                        else:  st.error(msg)
+                    if c_clr2.button("🗑️ 2차 초기화", use_container_width=True, key="adm_vac_clr2"):
+                        ok, msg = mgr.clear_intern_vacation(sel_vac_intern, '2차')
+                        st.success(msg)
+
+            st.divider()
+
+            # ── 분당 근무 현황 ──────────────────────────────────────────────────
+            st.subheader(f"🏥 분당 근무 현황 (최소 {BUNDANG_MIN_TURNS}개)")
+            bundang_rows = []
+            for intern in all_interns:
+                bc = mgr.count_bundang(intern)
+                bundang_rows.append({
+                    '이름': intern,
+                    '분당 턴 수': bc,
+                    '상태': f"✅ 충족 ({bc}/{BUNDANG_MIN_TURNS})" if bc >= BUNDANG_MIN_TURNS
+                            else f"🚨 부족 ({bc}/{BUNDANG_MIN_TURNS})",
+                })
+            st.dataframe(pd.DataFrame(bundang_rows), use_container_width=True, hide_index=True)
 
     st.stop()
 
