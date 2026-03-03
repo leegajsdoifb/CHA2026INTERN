@@ -27,8 +27,8 @@ LOCKED_TURNS     = {'1턴', '2턴'}   # 교환 불가 턴
 # ── 휴가 관련 상수 ─────────────────────────────────────────────────────────────
 VACATION_PERIOD_1  = {'4턴', '5턴', '6턴', '7턴'}   # 1차 휴가 기간
 VACATION_PERIOD_2  = {'8턴', '9턴', '10턴', '11턴'} # 2차 휴가 기간
-VACATION_TYPES     = ['A1','A2','A3','A4','B1','B2','B3','B4','C1','C2','C3','C4','단독']
-# A = IM 과 휴가 / B = EMC 과 휴가 / C = IM·EMC 외 분당 과 휴가 / 단독 = 파견병원 휴가
+VACATION_TYPES     = ['A1','A2','A3','A4','B1','B2','B3','B4','C1','C2','C3','C4']
+# A = IM 과 휴가 / B = EMC 과 휴가 / C = IM·EMC 외 분당 과 또는 파견병원 휴가
 BUNDANG_MIN_TURNS  = 7   # 분당 근무 최소 턴 수 (전체 13개 중)
 
 HISTORY_HEADER = ['날짜시간', '신청자', '상대방', '교환턴',
@@ -1086,12 +1086,11 @@ class DataManager:
 
     # ── 휴가 관련 헬퍼 ────────────────────────────────────────────────────────
     def get_vacation_group(self, vac_type):
-        """'A2' → 'A',  'B3' → 'B',  'C1' → 'C',  '단독' → '단독'"""
+        """'A2' → 'A',  'B3' → 'B',  'C1' → 'C',  '단독'(구버전) → 'C'"""
         s = str(vac_type)
         if s.startswith('A'): return 'A'
         if s.startswith('B'): return 'B'
-        if s.startswith('C'): return 'C'
-        return '단독'
+        return 'C'  # C* 또는 '단독'(하위호환) 모두 C 그룹
 
     def get_intern_vacation(self, name):
         """인턴의 휴가 배정 정보 반환. 없으면 {'1차': None, '2차': None}"""
@@ -1104,7 +1103,7 @@ class DataManager:
     def auto_derive_vacation_turn(self, name, period, vac_group):
         """
         스케줄을 보고 휴가 배정 가능한 턴을 자동 탐지.
-        vac_group: 'A' → IM 턴 탐색 / 'B' → EMC 턴 탐색 / '단독' → 파견병원 턴 탐색
+        vac_group: 'A' → IM 턴 / 'B' → EMC 턴 / 'C' → IM·EMC 외 분당 과 또는 파견병원 턴
         반환: (turn: str or None, dept: str or None, error_msg: str or None)
         """
         period_turns = sorted(
@@ -1114,7 +1113,7 @@ class DataManager:
         if name not in self.df.index:
             return None, None, f"{name}을(를) 스케줄에서 찾을 수 없습니다."
 
-        target_dept = {'A': 'IM', 'B': 'EMC'}.get(vac_group)  # C/단독 → None
+        target_dept = {'A': 'IM', 'B': 'EMC'}.get(vac_group)  # C → None
         candidates = []
 
         for t in period_turns:
@@ -1126,13 +1125,9 @@ class DataManager:
             loc, dept = self.parse_cell(val)
             loc = loc or DEFAULT_LOCATION
 
-            if vac_group == '단독':
-                # 파견병원(강남/일산/구미) 배치 턴
-                if loc in LOCATIONS:
-                    candidates.append((t, dept))
-            elif vac_group == 'C':
-                # IM·EMC 외 분당 과
-                if loc == DEFAULT_LOCATION and dept not in ('IM', 'EMC'):
+            if vac_group == 'C':
+                # IM·EMC 외 분당 과 OR 파견병원 배치 턴
+                if (loc == DEFAULT_LOCATION and dept not in ('IM', 'EMC')) or loc in LOCATIONS:
                     candidates.append((t, dept))
             else:
                 # A=IM, B=EMC
@@ -1140,7 +1135,7 @@ class DataManager:
                     candidates.append((t, dept))
 
         if not candidates:
-            dept_label = {'A': 'IM', 'B': 'EMC'}.get(vac_group, '파견병원')
+            dept_label = {'A': 'IM', 'B': 'EMC', 'C': 'IM·EMC외 분당 과 또는 파견병원'}.get(vac_group, '기타')
             return None, None, (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
                                 f"{dept_label} 배치 턴이 없습니다.")
 
@@ -1164,7 +1159,7 @@ class DataManager:
         """
         휴가 타입(vac_type)을 받아 스케줄에서 자동으로 휴가 턴을 탐지해 저장.
         period  : '1차' or '2차'
-        vac_type: 'A1'~'A4' (IM) / 'B1'~'B3' (EMC) / '단독' (파견)
+        vac_type: 'A1'~'A4' (IM) / 'B1'~'B4' (EMC) / 'C1'~'C4' (기타분당·파견)
         반환: (ok: bool, msg: str)
         """
         if vac_type not in VACATION_TYPES:
@@ -1191,7 +1186,7 @@ class DataManager:
     def auto_assign_all_vacations(self):
         """
         모든 인턴 휴가 자동 배정 (1차·2차 각각).
-        우선순위: A(IM) → B(EMC) → 단독(파견병원) → C(기타 분당 과)
+        우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
         반환: [{'name': str, 'success': [msg,...], 'errors': [msg,...]}]
         """
         _sort = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
@@ -1204,23 +1199,20 @@ class DataManager:
                 period_turns = _sort(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
                 assigned = False
 
-                # 우선순위: A(IM) → B(EMC) → 단독(파견) → C(기타 분당)
-                for group, prefix in [('A', 'A'), ('B', 'B'), ('단독', '단독'), ('C', 'C')]:
+                # 우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
+                for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
                     t, dept, err = self.auto_derive_vacation_turn(name, period, group)
                     if not t:
                         continue  # 이 그룹 해당 없음 → 다음 우선순위로
 
-                    # vac_type 결정: 단독은 '단독', 나머지는 '그룹 + 주차번호'
-                    if group == '단독':
-                        vac_type = '단독'
-                    else:
-                        try:
-                            week = period_turns.index(t) + 1
-                        except ValueError:
-                            week = 1
-                        vac_type = f"{prefix}{week}"
-                        if vac_type not in VACATION_TYPES:
-                            vac_type = f"{prefix}1"  # fallback
+                    # vac_type 결정: 그룹 + 기간 내 주차번호
+                    try:
+                        week = period_turns.index(t) + 1
+                    except ValueError:
+                        week = 1
+                    vac_type = f"{prefix}{week}"
+                    if vac_type not in VACATION_TYPES:
+                        vac_type = f"{prefix}1"  # fallback
 
                     ok, msg = self.set_intern_vacation(name, period, vac_type)
                     if ok:
@@ -1870,7 +1862,7 @@ if user == 'ADMIN':
         st.info(
             f"**1차 휴가 기간**: {', '.join(_num_sort(VACATION_PERIOD_1))}  |  "
             f"**2차 휴가 기간**: {', '.join(_num_sort(VACATION_PERIOD_2))}\n\n"
-            "휴가 타입: **A1~A4** (A그룹 1~4주차) / **B1~B4** (B그룹 1~4주차) / **단독** (독립)"
+            "휴가 타입: **A1~A4** (A그룹 IM, 1~4주차) / **B1~B4** (B그룹 EMC, 1~4주차) / **C1~C4** (C그룹 기타분당·파견, 1~4주차)"
         )
 
         if mgr.df.empty:
@@ -1904,7 +1896,7 @@ if user == 'ADMIN':
             st.subheader("🤖 전체 자동 배정")
             st.caption(
                 "모든 인턴의 1차·2차 휴가를 자동으로 배정합니다.  \n"
-                "우선순위: **A(IM)** → **B(EMC)** → **단독(파견병원)** → **C(기타 분당 과)**  \n"
+                "우선순위: **A(IM)** → **B(EMC)** → **C(기타 분당 과 또는 파견병원)**  \n"
                 "⚠️ 이미 배정된 항목도 덮어씁니다."
             )
             if st.button("🤖 전체 자동 배정 실행", type="primary",
@@ -1952,7 +1944,8 @@ if user == 'ADMIN':
                             '휴가 가능': (
                                 '✅ A타입(IM)' if dept == 'IM' else
                                 '✅ B타입(EMC)' if dept == 'EMC' else
-                                '✅ 단독(파견)' if loc in LOCATIONS else '—'
+                                '✅ C타입(파견병원)' if loc in LOCATIONS else
+                                '✅ C타입(기타분당)' if loc == DEFAULT_LOCATION else '—'
                             )
                         })
                     st.dataframe(pd.DataFrame(sched_rows), use_container_width=True, hide_index=True)
@@ -1966,9 +1959,9 @@ if user == 'ADMIN':
                     def_p1ty = cur_vac['1차']['type'] if cur_vac['1차'] else 'A1'
                     p1_type_idx = all_types.index(def_p1ty) if def_p1ty in all_types else 0
                     sel_p1_type = st.selectbox(
-                        "1차 타입 (A=IM / B=EMC / 단독=파견)", all_types,
+                        "1차 타입 (A=IM / B=EMC / C=기타분당·파견)", all_types,
                         index=p1_type_idx, key="adm_p1_type",
-                        help="A1~A4: IM 턴에서 휴가 | B1~B3: EMC 턴에서 휴가 | 단독: 파견병원에서 휴가"
+                        help="A1~A4: IM 턴에서 휴가 | B1~B4: EMC 턴에서 휴가 | C1~C4: 기타 분당 과 또는 파견병원에서 휴가"
                     )
                     # 미리보기: 어느 턴이 될지 표시
                     grp1 = mgr.get_vacation_group(sel_p1_type)
@@ -1995,9 +1988,9 @@ if user == 'ADMIN':
                     def_p2ty = cur_vac['2차']['type'] if cur_vac['2차'] else 'A1'
                     p2_type_idx = all_types.index(def_p2ty) if def_p2ty in all_types else 0
                     sel_p2_type = st.selectbox(
-                        "2차 타입 (A=IM / B=EMC / 단독=파견)", all_types,
+                        "2차 타입 (A=IM / B=EMC / C=기타분당·파견)", all_types,
                         index=p2_type_idx, key="adm_p2_type",
-                        help="A1~A4: IM 턴에서 휴가 | B1~B3: EMC 턴에서 휴가 | 단독: 파견병원에서 휴가"
+                        help="A1~A4: IM 턴에서 휴가 | B1~B4: EMC 턴에서 휴가 | C1~C4: 기타 분당 과 또는 파견병원에서 휴가"
                     )
                     grp2 = mgr.get_vacation_group(sel_p2_type)
                     prev_t2, prev_d2, prev_e2 = mgr.auto_derive_vacation_turn(sel_vac_intern, '2차', grp2)
