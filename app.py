@@ -1237,8 +1237,34 @@ st.set_page_config(layout="wide", page_title="인턴 턴표 교환 시스템",
 # ── 모드별 CSS ────────────────────────────────────────────────────────────────
 _PC_CSS = """
 <style>
-section[data-testid="stSidebar"] { width: 400px !important; }
-section[data-testid="stSidebar"] > div:first-child { width: 400px !important; }
+/* 사이드바 너비 */
+section[data-testid="stSidebar"] { width: 360px !important; }
+section[data-testid="stSidebar"] > div:first-child { width: 360px !important; }
+
+/* 메인 컨텐츠 영역 */
+.block-container {
+    padding-top: 2.5rem !important;
+    padding-left: 2.5rem !important;
+    padding-right: 2.5rem !important;
+    max-width: 1100px !important;
+}
+
+/* 버튼 */
+.stButton > button { min-height: 2.2rem; font-size: 1rem; }
+
+/* 선택박스·입력 레이블 */
+.stSelectbox label, .stTextInput label { font-size: 1rem !important; }
+
+/* 표 */
+.stDataFrame { font-size: 0.9rem; }
+
+/* 제목 */
+h1 { font-size: 2rem !important; }
+h2 { font-size: 1.5rem !important; }
+h3 { font-size: 1.2rem !important; }
+
+/* 컬럼 간격 */
+[data-testid="column"] { padding: 0 6px !important; }
 </style>
 """
 
@@ -2150,15 +2176,25 @@ with tab_post:
         can_post = bool(give_turn_k)
 
     else:  # 받을 턴 지정
-        sel_want_turn = st.selectbox("받고싶은 턴", all_turns_p, key=f"mkt_want_turn_{fv}")
-        give_turn_k   = '아무턴'
-        give_val_k    = ''
-        want_str_k    = sel_want_turn or ''
-        if user in mgr.df.index and sel_want_turn and sel_want_turn in mgr.df.columns:
-            my_val_wt = mgr.df.loc[user, sel_want_turn] or ''
-            st.write(f"📌 내 {sel_want_turn} 현재 값: **`{my_val_wt}`**")
-            st.info(f"💡 상대방이 {sel_want_turn}에 다른 값을 갖고 있다면 교환 신청을 받을 수 있습니다.")
-        can_post = bool(sel_want_turn)
+        all_vals_want2 = sorted(set(
+            str(v).strip() for col in mgr.df.columns
+            for v in mgr.df[col].dropna()
+            if v and str(v).strip() not in ('None', '', '예비턴')
+        )) if not mgr.df.empty else []
+        sel_want_vals = st.multiselect(
+            "받고 싶은 과목 (복수 선택 가능, 예: IM, ANE)",
+            all_vals_want2,
+            key=f"mkt_want_vals_{fv}",
+            help="선택한 과목 중 하나라도 갖고 있는 사람의 교환 신청을 받을 수 있습니다. 선택하지 않으면 무관"
+        )
+        give_turn_k = '아무턴'
+        give_val_k  = ''
+        want_str_k  = ', '.join(sel_want_vals) if sel_want_vals else '무관'
+        if sel_want_vals:
+            st.info(f"💡 **{', '.join(sel_want_vals)}** 과목이 있는 턴을 줄 수 있는 사람의 교환 신청을 받습니다.")
+        else:
+            st.caption("과목을 선택하지 않으면 어떤 과목이든 무관하게 등록됩니다.")
+        can_post = True  # 과목 미선택(무관)도 등록 가능
 
     p_msg = st.text_area(
         "메시지 (선택)", placeholder="교환 사유, 연락처 등",
