@@ -18,7 +18,7 @@ SHEET_TAB_NAME     = '2026년 입사 인턴 스케쥴'
 PASSWD_SHEET_NAME  = '비밀번호'
 HISTORY_SHEET_NAME = '교환이력'
 MARKET_SHEET_NAME  = '장터'
-VACATION_SHEET_NAME = '2026년 입사 인턴 스케쥴_휴가 반영'
+VACATION_SHEET_NAME = '2026년 입사 인턴 스케쥴_휴가에 반영'
 
 ESSENTIAL_DEPTS  = {'IM', 'GS', 'OB', 'PE', '진로탐색'}
 LOCATIONS        = {'일산', '구미', '강남'}
@@ -1188,51 +1188,55 @@ class DataManager:
         """
         모든 인턴 휴가 자동 배정 (1차·2차 각각).
         우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
+        A1-A4 = 한 턴 내 1-4주차. 같은 턴+그룹의 인턴끼리 주차를 자동 분배.
         반환: [{'name': str, 'success': [msg,...], 'errors': [msg,...]}]
         """
-        _sort = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
+        # ── 1단계: 각 인턴×기간 별 (턴, 그룹) 결정 ─────────────────────
+        # slot_map[period][(turn, prefix)] = [(name, dept), ...]
+        slot_map = {'1차': {}, '2차': {}}
+        no_match = []  # (name, period)
 
-        results = []
         for name in self.df.index:
-            row = {'name': name, 'success': [], 'errors': []}
-
             for period in ('1차', '2차'):
-                period_turns = _sort(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
-                assigned = False
-
-                # 우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
+                found = False
                 for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
                     t, dept, err = self.auto_derive_vacation_turn(name, period, group)
-                    if not t:
-                        continue  # 이 그룹 해당 없음 → 다음 우선순위로
+                    if t:
+                        key = (t, prefix)
+                        slot_map[period].setdefault(key, []).append((name, dept))
+                        found = True
+                        break
+                if not found:
+                    no_match.append((name, period))
 
-                    # vac_type 결정: 그룹 + 기간 내 주차번호
-                    try:
-                        week = period_turns.index(t) + 1
-                    except ValueError:
-                        week = 1
-                    vac_type = f"{prefix}{week}"
-                    if vac_type not in VACATION_TYPES:
-                        vac_type = f"{prefix}1"  # fallback
+        # ── 2단계: 같은 (턴, 그룹) 인턴끼리 1-4주차 순차 배정 ─────────
+        results = {name: {'name': name, 'success': [], 'errors': []}
+                   for name in self.df.index}
+
+        for period, groups in slot_map.items():
+            for (turn, prefix), interns in groups.items():
+                for idx, (name, dept) in enumerate(interns):
+                    week = (idx % 4) + 1          # 1,2,3,4 순환
+                    vac_type = f"{prefix}{week}"   # A1, A2, ...
 
                     ok, msg = self.set_intern_vacation(name, period, vac_type)
                     if ok:
-                        row['success'].append(msg)
-                        assigned = True
-                        break
+                        results[name]['success'].append(msg)
                     else:
-                        row['errors'].append(msg)
+                        results[name]['errors'].append(msg)
 
-                if not assigned:
-                    row['errors'].append(f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
+        # 미매칭 인턴 에러 기록
+        for name, period in no_match:
+            results[name]['errors'].append(
+                f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
 
-            results.append(row)
-        return results
+        return list(results.values())
 
     def sync_vacation_sheet(self):
         """
-        'VACATION_SHEET_NAME' 시트에 스케줄 전체를 쓰되,
-        각 인턴의 휴가 턴 셀은  '원래값\n타입'  (예: IM\nA1) 으로 표기.
+        원본 스케줄 시트의 전체 구조(헤더·서브헤더·레이아웃)를 그대로 복사하고,
+        각 인턴의 휴가 배정 턴 셀만  '원래값\n타입'  (예: IM\nA1)으로 수정하여
+        VACATION_SHEET_NAME 시트에 쓴다.
         반환: (ok: bool, msg: str)
         """
         if not self.sheet_connected:
@@ -1241,57 +1245,86 @@ class DataManager:
             return False, "스케줄 데이터가 없습니다."
 
         try:
-            # 시트 가져오기 or 생성
+            # ── 1) 원본 시트 전체 읽기 ──────────────────────────────────────
+            src_rows = self.worksheet.get_all_values()
+            if not src_rows:
+                return False, "원본 스케줄 시트가 비어 있습니다."
+
+            # ── 2) 헤더·이름열·턴열 위치 파악 (fetch_data_from_sheet와 동일 로직)
+            header_row_idx = name_col_idx = None
+            for row_i, row in enumerate(src_rows):
+                for col_i, h in enumerate(row):
+                    if '성명' in h or '이름' in h:
+                        header_row_idx, name_col_idx = row_i, col_i
+                        break
+                if header_row_idx is not None:
+                    break
+            if header_row_idx is None:
+                return False, "원본 시트에서 '성명'/'이름' 헤더를 찾을 수 없습니다."
+
+            header = src_rows[header_row_idx]
+            # {턴이름: 열인덱스} 매핑   예: {'1턴': 3, '2턴': 4, ...}
+            turn_col_map = {}
+            for ci, h in enumerate(header):
+                if re.search(r'\d+턴', h):
+                    turn_col_map[h.strip()] = ci
+
+            # ── 3) 인턴별 휴가 배정 정보 수집 ─────────────────────────────
+            # {인턴이름: {턴: vac_type}}
+            vac_map = {}
+            for intern in self.df.index:
+                vac = self.get_intern_vacation(intern)
+                turns_dict = {}
+                for period in ('1차', '2차'):
+                    v = vac[period]
+                    if v and v.get('turn') and v.get('type'):
+                        turns_dict[v['turn']] = v['type']
+                if turns_dict:
+                    vac_map[intern] = turns_dict
+
+            # ── 4) 원본 데이터 복사 + 휴가 셀만 수정 ───────────────────────
+            out_rows = []
+            modified_count = 0
+
+            for row_i, row in enumerate(src_rows):
+                new_row = list(row)  # 원본 그대로 복사
+
+                # 헤더 행 이후 데이터 행만 처리
+                if row_i > header_row_idx:
+                    # 이름 셀 읽기
+                    intern_name = ''
+                    if name_col_idx < len(row):
+                        intern_name = row[name_col_idx].strip()
+
+                    if intern_name and intern_name in vac_map:
+                        for turn_name, vac_type in vac_map[intern_name].items():
+                            ci = turn_col_map.get(turn_name)
+                            if ci is None or ci >= len(new_row):
+                                continue
+                            original = new_row[ci].strip()
+                            top = original if original else '(미기재)'
+                            new_row[ci] = f"{top}\n{vac_type}"
+                            modified_count += 1
+
+                out_rows.append(new_row)
+
+            # ── 5) 대상 시트 가져오기 / 생성 ──────────────────────────────
             try:
                 ws = self.sh.worksheet(VACATION_SHEET_NAME)
             except gspread.WorksheetNotFound:
                 ws = self.sh.add_worksheet(
                     title=VACATION_SHEET_NAME,
-                    rows=max(len(self.df) + 5, 50),
-                    cols=max(len(self.df.columns) + 3, 20)
+                    rows=max(len(out_rows) + 5, 50),
+                    cols=max(len(out_rows[0]) + 2, 20) if out_rows else 20
                 )
 
-            # 턴 컬럼을 숫자 순으로 정렬
-            def _turn_key(t):
-                m = re.search(r'\d+', str(t))
-                return int(m.group()) if m else 999
-
-            turns = sorted(self.df.columns, key=_turn_key)
-
-            # 헤더행
-            header = ['이름'] + turns
-            data   = [header]
-
-            # 인턴별 행 구성
-            for intern in self.df.index:
-                vac = self.get_intern_vacation(intern)
-                # 1차·2차 휴가 턴 dict: {turn: vac_type}
-                vac_turns = {}
-                for period in ('1차', '2차'):
-                    v = vac[period]
-                    if v and v.get('turn') and v.get('type'):
-                        vac_turns[v['turn']] = v['type']
-
-                row = [intern]
-                for turn in turns:
-                    raw = self.df.loc[intern, turn]
-                    cell_val = '' if (not raw or str(raw) in ('None', 'nan')) else str(raw).strip()
-
-                    if turn in vac_turns:
-                        # 휴가 턴: 원래값(과목) + 줄바꿈 + 타입
-                        # 셀이 비어있으면 과목명 없이 타입만
-                        top = cell_val if cell_val else '(미기재)'
-                        cell_val = f"{top}\n{vac_turns[turn]}"
-
-                    row.append(cell_val)
-                data.append(row)
-
-            # 시트 초기화 후 일괄 쓰기
+            # ── 6) 시트 초기화 후 일괄 쓰기 ──────────────────────────────
             ws.clear()
-            ws.update('A1', data, value_input_option='USER_ENTERED')
+            ws.update('A1', out_rows, value_input_option='USER_ENTERED')
 
+            intern_count = len(vac_map)
             return True, (f"✅ '{VACATION_SHEET_NAME}' 시트 업데이트 완료 "
-                          f"({len(self.df)}명 / {len(turns)}턴)")
+                          f"(인턴 {intern_count}명 / 휴가 셀 {modified_count}개 반영)")
 
         except Exception as e:
             return False, f"시트 업데이트 실패: {e}"
@@ -1930,7 +1963,7 @@ if user == 'ADMIN':
         st.info(
             f"**1차 휴가 기간**: {', '.join(_num_sort(VACATION_PERIOD_1))}  |  "
             f"**2차 휴가 기간**: {', '.join(_num_sort(VACATION_PERIOD_2))}\n\n"
-            "휴가 타입: **A1~A4** (A그룹 IM, 1~4주차) / **B1~B4** (B그룹 EMC, 1~4주차) / **C1~C4** (C그룹 기타분당·파견, 1~4주차)"
+            "휴가 타입: **A1-A4** (A그룹 IM, 1-4주차) / **B1-B4** (B그룹 EMC, 1-4주차) / **C1-C4** (C그룹 기타분당·파견, 1-4주차)"
         )
 
         if mgr.df.empty:
@@ -2029,7 +2062,7 @@ if user == 'ADMIN':
                     sel_p1_type = st.selectbox(
                         "1차 타입 (A=IM / B=EMC / C=기타분당·파견)", all_types,
                         index=p1_type_idx, key="adm_p1_type",
-                        help="A1~A4: IM 턴에서 휴가 | B1~B4: EMC 턴에서 휴가 | C1~C4: 기타 분당 과 또는 파견병원에서 휴가"
+                        help="A1-A4: IM 턴에서 휴가 (1-4주차) | B1-B4: EMC 턴에서 휴가 (1-4주차) | C1-C4: 기타 분당·파견병원에서 휴가 (1-4주차)"
                     )
                     # 미리보기: 어느 턴이 될지 표시
                     grp1 = mgr.get_vacation_group(sel_p1_type)
@@ -2058,7 +2091,7 @@ if user == 'ADMIN':
                     sel_p2_type = st.selectbox(
                         "2차 타입 (A=IM / B=EMC / C=기타분당·파견)", all_types,
                         index=p2_type_idx, key="adm_p2_type",
-                        help="A1~A4: IM 턴에서 휴가 | B1~B4: EMC 턴에서 휴가 | C1~C4: 기타 분당 과 또는 파견병원에서 휴가"
+                        help="A1-A4: IM 턴에서 휴가 (1-4주차) | B1-B4: EMC 턴에서 휴가 (1-4주차) | C1-C4: 기타 분당·파견병원에서 휴가 (1-4주차)"
                     )
                     grp2 = mgr.get_vacation_group(sel_p2_type)
                     prev_t2, prev_d2, prev_e2 = mgr.auto_derive_vacation_turn(sel_vac_intern, '2차', grp2)
