@@ -1107,7 +1107,10 @@ class DataManager:
         vac_group: 'A' → IM 턴 탐색 / 'B' → EMC 턴 탐색 / '단독' → 파견병원 턴 탐색
         반환: (turn: str or None, dept: str or None, error_msg: str or None)
         """
-        period_turns = sorted(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
+        period_turns = sorted(
+            VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
+            key=lambda x: int(x.replace('턴', ''))
+        )
         if name not in self.df.index:
             return None, None, f"{name}을(를) 스케줄에서 찾을 수 없습니다."
 
@@ -1184,6 +1187,54 @@ class DataManager:
             del self.vacation_data[name][period]
             self.save_db()
         return True, f"{name} {period} 휴가 초기화 완료"
+
+    def auto_assign_all_vacations(self):
+        """
+        모든 인턴 휴가 자동 배정 (1차·2차 각각).
+        우선순위: A(IM) → B(EMC) → 단독(파견병원) → C(기타 분당 과)
+        반환: [{'name': str, 'success': [msg,...], 'errors': [msg,...]}]
+        """
+        _sort = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
+
+        results = []
+        for name in self.df.index:
+            row = {'name': name, 'success': [], 'errors': []}
+
+            for period in ('1차', '2차'):
+                period_turns = _sort(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
+                assigned = False
+
+                # 우선순위: A(IM) → B(EMC) → 단독(파견) → C(기타 분당)
+                for group, prefix in [('A', 'A'), ('B', 'B'), ('단독', '단독'), ('C', 'C')]:
+                    t, dept, err = self.auto_derive_vacation_turn(name, period, group)
+                    if not t:
+                        continue  # 이 그룹 해당 없음 → 다음 우선순위로
+
+                    # vac_type 결정: 단독은 '단독', 나머지는 '그룹 + 주차번호'
+                    if group == '단독':
+                        vac_type = '단독'
+                    else:
+                        try:
+                            week = period_turns.index(t) + 1
+                        except ValueError:
+                            week = 1
+                        vac_type = f"{prefix}{week}"
+                        if vac_type not in VACATION_TYPES:
+                            vac_type = f"{prefix}1"  # fallback
+
+                    ok, msg = self.set_intern_vacation(name, period, vac_type)
+                    if ok:
+                        row['success'].append(msg)
+                        assigned = True
+                        break
+                    else:
+                        row['errors'].append(msg)
+
+                if not assigned:
+                    row['errors'].append(f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
+
+            results.append(row)
+        return results
 
     def validate_vacation_exchange(self, sender, receiver, turn):
         """
@@ -1815,9 +1866,10 @@ if user == 'ADMIN':
     # ── 관리자 탭6: 휴가 배정 ──────────────────────────────────────────────────
     with adm_tab6:
         st.subheader("📅 인턴 휴가 배정")
+        _num_sort = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
         st.info(
-            f"**1차 휴가 기간**: {', '.join(sorted(VACATION_PERIOD_1))}  |  "
-            f"**2차 휴가 기간**: {', '.join(sorted(VACATION_PERIOD_2))}\n\n"
+            f"**1차 휴가 기간**: {', '.join(_num_sort(VACATION_PERIOD_1))}  |  "
+            f"**2차 휴가 기간**: {', '.join(_num_sort(VACATION_PERIOD_2))}\n\n"
             "휴가 타입: **A1~A4** (A그룹 1~4주차) / **B1~B4** (B그룹 1~4주차) / **단독** (독립)"
         )
 
@@ -1845,6 +1897,34 @@ if user == 'ADMIN':
                 })
             vac_df = pd.DataFrame(vac_rows)
             st.dataframe(vac_df, use_container_width=True, hide_index=True)
+
+            st.divider()
+
+            # ── 전체 자동 배정 ─────────────────────────────────────────────────
+            st.subheader("🤖 전체 자동 배정")
+            st.caption(
+                "모든 인턴의 1차·2차 휴가를 자동으로 배정합니다.  \n"
+                "우선순위: **A(IM)** → **B(EMC)** → **단독(파견병원)** → **C(기타 분당 과)**  \n"
+                "⚠️ 이미 배정된 항목도 덮어씁니다."
+            )
+            if st.button("🤖 전체 자동 배정 실행", type="primary",
+                         use_container_width=True, key="adm_auto_assign_all"):
+                with st.spinner("전체 인턴 휴가 자동 배정 중..."):
+                    auto_results = mgr.auto_assign_all_vacations()
+
+                ok_count  = sum(1 for r in auto_results if not r['errors'])
+                err_count = len(auto_results) - ok_count
+                st.info(f"완료: ✅ {ok_count}명 성공 / ⚠️ {err_count}명 일부 미배정")
+
+                with st.expander("📋 배정 결과 상세", expanded=True):
+                    for r in auto_results:
+                        if r['errors']:
+                            detail = " / ".join(r['success'] + r['errors'])
+                            st.warning(f"**{r['name']}** — {detail}")
+                        else:
+                            detail = " / ".join(r['success'])
+                            st.success(f"**{r['name']}** — {detail}")
+                st.rerun()
 
             st.divider()
 
