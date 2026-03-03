@@ -1341,7 +1341,14 @@ if 'user_id' not in st.session_state:
         input_id = st.text_input("이름 (예: 이규)", placeholder="이름 입력")
         input_pw = st.text_input("비밀번호 (기본: 1234)", type="password")
         if st.button("로그인", type="primary"):
-            if input_id in mgr.df.index:
+            if input_id == 'ADMIN':
+                admin_pw = mgr.passwords.get('ADMIN', '1234')
+                if input_pw == admin_pw:
+                    st.session_state.user_id = 'ADMIN'
+                    st.rerun()
+                else:
+                    st.error("관리자 비밀번호가 틀렸습니다.")
+            elif input_id in mgr.df.index:
                 if mgr.check_password(input_id, input_pw):
                     st.session_state.user_id = input_id
                     if input_pw == '1234':
@@ -1354,6 +1361,217 @@ if 'user_id' not in st.session_state:
     st.stop()
 
 user = st.session_state.user_id
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  관리자 대시보드
+# ══════════════════════════════════════════════════════════════════════════════
+if user == 'ADMIN':
+    with st.sidebar:
+        st.markdown("### 🔐 관리자 모드")
+        st.caption("ADMIN 계정으로 로그인됨")
+        st.divider()
+        if st.button("🚪 로그아웃", use_container_width=True):
+            del st.session_state['user_id']
+            st.rerun()
+        if st.button("🔄 데이터 새로고침", use_container_width=True):
+            st.session_state.manager = DataManager()
+            st.rerun()
+
+    st.title("🔐 관리자 대시보드")
+    st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
+
+    adm_tab1, adm_tab2, adm_tab3, adm_tab4, adm_tab5 = st.tabs([
+        "📊 스케줄 통계", "📋 전체 스케줄", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리"
+    ])
+
+    # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
+    with adm_tab1:
+        if mgr.df.empty:
+            st.warning("스케줄 데이터가 없습니다.")
+        else:
+            # 1) 각 턴별 과목 인원 집계
+            st.subheader("📌 턴별 과목 배치 현황")
+            dept_matrix = {}
+            for col in mgr.df.columns:
+                counts = {}
+                for val in mgr.df[col]:
+                    if val and str(val) not in ('None', '', 'nan'):
+                        _, dept = mgr.parse_cell(val)
+                        if dept:
+                            counts[dept] = counts.get(dept, 0) + 1
+                dept_matrix[col] = counts
+
+            matrix_df = pd.DataFrame(dept_matrix).fillna(0).astype(int)
+            matrix_df.index.name = '과목'
+            # 필수과목 먼저 정렬
+            priority = [d for d in sorted(ESSENTIAL_DEPTS) if d in matrix_df.index]
+            others_d = [d for d in matrix_df.index if d not in ESSENTIAL_DEPTS]
+            matrix_df = matrix_df.loc[priority + sorted(others_d)]
+
+            st.dataframe(
+                matrix_df.style.background_gradient(cmap='Blues', axis=None),
+                use_container_width=True, height=400
+            )
+            st.caption("숫자 = 해당 턴에서 그 과목을 배치받은 인원 수. 색이 진할수록 많음.")
+
+            # 2) 과목별 전체 합산
+            st.subheader("📌 과목별 전체 인원 합산")
+            total_by_dept = matrix_df.sum(axis=1).sort_values(ascending=False)
+            col_b1, col_b2 = st.columns([2, 1])
+            with col_b1:
+                st.bar_chart(total_by_dept)
+            with col_b2:
+                st.dataframe(
+                    total_by_dept.rename("총 배치 횟수").reset_index(),
+                    use_container_width=True, hide_index=True
+                )
+
+            # 3) 필수과목 충족 현황
+            st.subheader("📌 필수과목 충족 현황")
+            st.caption(f"필수과목: {', '.join(sorted(ESSENTIAL_DEPTS))}")
+            status_rows = []
+            for intern in mgr.df.index:
+                valid, missing = mgr.validate_intern(intern)
+                depts_in_sched = set()
+                for col in mgr.df.columns:
+                    val = mgr.df.loc[intern, col]
+                    if val and str(val) not in ('None', '', 'nan'):
+                        _, dept = mgr.parse_cell(val)
+                        if dept:
+                            depts_in_sched.add(dept)
+                status_rows.append({
+                    '이름': intern,
+                    '충족 여부': '✅ 충족' if valid else f'🚨 미달 ({len(missing)}개)',
+                    '미달 과목': ', '.join(sorted(missing)) if missing else '-',
+                    '보유 필수과목': ', '.join(sorted(ESSENTIAL_DEPTS & depts_in_sched)),
+                })
+            status_df = pd.DataFrame(status_rows)
+            n_ok  = status_df['충족 여부'].str.startswith('✅').sum()
+            n_bad = len(status_df) - n_ok
+            c1, c2, c3 = st.columns(3)
+            c1.metric("전체 인원", len(status_df))
+            c2.metric("조건 충족", n_ok, delta=f"+{n_ok}")
+            c3.metric("조건 미달", n_bad, delta=f"-{n_bad}" if n_bad else "0")
+            st.dataframe(status_df, use_container_width=True, hide_index=True)
+
+    # ── 관리자 탭2: 전체 스케줄 ────────────────────────────────────────────────
+    with adm_tab2:
+        if mgr.df.empty:
+            st.warning("스케줄 데이터가 없습니다.")
+        else:
+            st.subheader("📋 전체 인턴 스케줄")
+            st.dataframe(mgr.df, use_container_width=True, height=600)
+
+            st.subheader("🔍 인턴별 상세")
+            sel_intern = st.selectbox("인턴 선택", list(mgr.df.index), key="adm_intern_sel")
+            if sel_intern:
+                row = mgr.df.loc[sel_intern]
+                detail_rows = []
+                for col in mgr.df.columns:
+                    val = row[col]
+                    _, dept = mgr.parse_cell(val) if val and str(val) not in ('None','') else (None, None)
+                    detail_rows.append({
+                        '턴': col,
+                        '배치값': val or '-',
+                        '과목': dept or '-',
+                        '필수과목 여부': '⭐' if dept in ESSENTIAL_DEPTS else ''
+                    })
+                v, miss = mgr.validate_intern(sel_intern)
+                if v:
+                    st.success(f"✅ {sel_intern}: 필수과목 모두 충족")
+                else:
+                    st.error(f"🚨 {sel_intern}: 미달 과목 → {', '.join(sorted(miss))}")
+                st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
+
+    # ── 관리자 탭3: 교환 이력 ─────────────────────────────────────────────────
+    with adm_tab3:
+        st.subheader("🔄 교환 이력")
+        hist_rows = mgr.fetch_history_data()
+        if len(hist_rows) < 2:
+            st.info("교환 이력이 없습니다.")
+        else:
+            hist_header = hist_rows[0]
+            hist_df = pd.DataFrame(hist_rows[1:], columns=hist_header)
+            # 최신순 정렬
+            if '날짜시간' in hist_df.columns:
+                hist_df = hist_df.sort_values('날짜시간', ascending=False)
+            st.dataframe(hist_df, use_container_width=True, hide_index=True, height=500)
+            st.caption(f"총 {len(hist_df)}건의 이력")
+
+        st.divider()
+        st.subheader("⏳ 현재 대기 중인 요청")
+        pending = [r for r in mgr.requests if r.get('status') == 'pending']
+        if not pending:
+            st.info("대기 중인 요청이 없습니다.")
+        else:
+            pend_rows = []
+            for r in pending:
+                pend_rows.append({
+                    'ID':    r.get('id', ''),
+                    '신청자': r.get('sender', ''),
+                    '상대방': r.get('receiver', ''),
+                    '턴':    r.get('turn', ''),
+                    '체인':  r.get('chain_id', '-'),
+                })
+            st.dataframe(pd.DataFrame(pend_rows), use_container_width=True, hide_index=True)
+            st.caption(f"대기 중 {len(pending)}건")
+
+    # ── 관리자 탭4: 장터 현황 ─────────────────────────────────────────────────
+    with adm_tab4:
+        st.subheader("📝 장터 게시물 현황")
+        all_posts = mgr.market_posts
+        if not all_posts:
+            st.info("장터 게시물이 없습니다.")
+        else:
+            posts_df = pd.DataFrame(all_posts)
+            # 상태별 필터
+            status_filter = st.multiselect(
+                "상태 필터", ['활성', '마감', '완료'],
+                default=['활성'], key="adm_mkt_filter"
+            )
+            if status_filter:
+                filtered_posts = posts_df[posts_df.get('상태', pd.Series()).isin(status_filter)]
+            else:
+                filtered_posts = posts_df
+            st.dataframe(filtered_posts, use_container_width=True, hide_index=True, height=400)
+            # 요약
+            c1, c2, c3 = st.columns(3)
+            c1.metric("전체", len(all_posts))
+            c2.metric("활성", len([p for p in all_posts if p.get('상태') == '활성']))
+            c3.metric("완료/마감", len([p for p in all_posts if p.get('상태') in ('완료','마감')]))
+
+    # ── 관리자 탭5: 비밀번호 관리 ─────────────────────────────────────────────
+    with adm_tab5:
+        st.subheader("🔑 비밀번호 관리")
+        st.warning("⚠️ 비밀번호를 초기화하면 해당 인턴은 다음 로그인 시 변경 안내를 받습니다.")
+
+        all_users = list(mgr.df.index) + ['ADMIN']
+        sel_user_pw = st.selectbox("비밀번호를 초기화할 인턴", all_users, key="adm_pw_sel")
+        col_pw1, col_pw2 = st.columns(2)
+        new_pw_adm = col_pw1.text_input("새 비밀번호", type="password", key="adm_new_pw",
+                                         placeholder="기본값: 1234")
+        if col_pw2.button("🔄 비밀번호 초기화", type="primary", use_container_width=True,
+                           key="adm_pw_reset"):
+            target_pw = new_pw_adm.strip() if new_pw_adm.strip() else '1234'
+            ok, msg = mgr.update_password_in_sheet(sel_user_pw, target_pw)
+            if ok:
+                st.success(f"✅ {sel_user_pw}의 비밀번호가 **{target_pw}** 로 변경되었습니다.")
+            else:
+                st.error(msg)
+
+        st.divider()
+        st.subheader("📋 현재 비밀번호 목록")
+        st.caption("비밀번호가 초기값(1234)인 인턴을 확인하세요.")
+        pw_rows = []
+        for name, pw in mgr.passwords.items():
+            pw_rows.append({
+                '이름': name,
+                '비밀번호 상태': '🔴 초기 비밀번호' if pw == '1234' else '🟢 변경됨',
+            })
+        if pw_rows:
+            st.dataframe(pd.DataFrame(pw_rows), use_container_width=True, hide_index=True)
+
+    st.stop()
 
 # ── 첫 로그인: 비밀번호 변경 강제 안내 ──────────────────────────────────────
 if st.session_state.get('force_pw_change'):
