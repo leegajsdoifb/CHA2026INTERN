@@ -1194,16 +1194,52 @@ class DataManager:
 # ══════════════════════════════════════════════════════════════════════════════
 #  Streamlit UI
 # ══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(layout="wide", page_title="인턴 턴표 교환 시스템")
+st.set_page_config(layout="wide", page_title="인턴 턴표 교환 시스템",
+                   initial_sidebar_state="collapsed")
 
-# ── 사이드바 너비 확장 (기본 대비 +20%) ──────────────────────────────────────
+# ── 반응형 CSS (데스크탑 + 모바일) ───────────────────────────────────────────
 st.markdown("""
 <style>
-section[data-testid="stSidebar"] {
-    width: 400px !important;
+/* 데스크탑: 사이드바 너비 확장 */
+@media (min-width: 768px) {
+    section[data-testid="stSidebar"] {
+        width: 400px !important;
+    }
+    section[data-testid="stSidebar"] > div:first-child {
+        width: 400px !important;
+    }
 }
-section[data-testid="stSidebar"] > div:first-child {
-    width: 400px !important;
+
+/* 모바일: 전체 너비 활용 */
+@media (max-width: 767px) {
+    /* 메인 콘텐츠 패딩 최소화 */
+    .block-container {
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+        padding-top: 1rem !important;
+        max-width: 100% !important;
+    }
+    /* 컬럼 내부 간격 줄이기 */
+    [data-testid="column"] {
+        padding: 0 2px !important;
+    }
+    /* 버튼 터치 영역 확보 */
+    .stButton > button {
+        min-height: 2.5rem;
+        font-size: 0.9rem;
+    }
+    /* 셀렉트박스 레이블 크기 */
+    .stSelectbox label, .stTextInput label {
+        font-size: 0.85rem !important;
+    }
+    /* 데이터 테이블 폰트 */
+    .stDataFrame {
+        font-size: 0.75rem;
+    }
+    /* 제목 크기 조정 */
+    h1 { font-size: 1.5rem !important; }
+    h2 { font-size: 1.2rem !important; }
+    h3 { font-size: 1.1rem !important; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -1681,13 +1717,14 @@ to_remove = []
 for i, item in enumerate(st.session_state.exchange_items):
     iid = item['id']
     num_label = '①②③④⑤'[i] if i < 5 else f'{i+1}.'
-    c1, c2, c3, c4 = st.columns([1.5, 1.2, 2.8, 0.4])
     t_default    = item.get('target', others[0])    if others      else ''
     turn_default = item.get('turn',   avail_turns[0]) if avail_turns else ''
-    if t_default    not in others:     t_default    = others[0]     if others      else ''
+    if t_default    not in others:      t_default    = others[0]      if others      else ''
     if turn_default not in avail_turns: turn_default = avail_turns[0] if avail_turns else ''
+    # 1행: 상대방 | 턴 | ✕버튼
+    lbl = f"상대방 {num_label}" if len(st.session_state.exchange_items) > 1 else "상대방"
+    c1, c2, c4 = st.columns([2, 1.5, 0.5])
     with c1:
-        lbl = f"상대방 {num_label}" if len(st.session_state.exchange_items) > 1 else "상대방"
         sel_t = st.selectbox(lbl, others,
                              index=others.index(t_default), key=f'ei_t_{iid}')
     with c2:
@@ -1697,10 +1734,13 @@ for i, item in enumerate(st.session_state.exchange_items):
     st.session_state.exchange_items[i]['turn']   = sel_turn
     my_v = mgr.df.loc[user,   sel_turn] if user   in mgr.df.index else '?'
     pt_v = mgr.df.loc[sel_t,  sel_turn] if sel_t  in mgr.df.index else '?'
-    c3.write(f"나: `{my_v}` ↔ **{sel_t}**: `{pt_v}`")
-    if len(st.session_state.exchange_items) > 1:
-        if c4.button("✕", key=f'ei_rm_{iid}', help="항목 제거"):
-            to_remove.append(i)
+    # 2행: 교환 정보 | 삭제 버튼
+    with c4:
+        st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
+        if len(st.session_state.exchange_items) > 1:
+            if st.button("✕", key=f'ei_rm_{iid}', help="항목 제거", use_container_width=True):
+                to_remove.append(i)
+    st.caption(f"나: `{my_v}` ↔ **{sel_t}**: `{pt_v}`")
 
 for idx in reversed(to_remove):
     st.session_state.exchange_items.pop(idx)
