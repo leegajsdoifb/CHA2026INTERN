@@ -1297,7 +1297,7 @@ if 'user_id' not in st.session_state:
     _lc, _rc = st.columns([4, 1])
     with _rc:
         _is_mobile = st.session_state.layout_mode == 'mobile'
-        if st.button("💻 PC" if _is_mobile else "📱 모바일",
+        if st.button("💻 PC 버전으로 전환" if _is_mobile else "📱 모바일 버전으로 전환",
                      use_container_width=True, key="login_mode_toggle"):
             st.session_state.layout_mode = 'pc' if _is_mobile else 'mobile'
             st.rerun()
@@ -1392,7 +1392,7 @@ with st.sidebar:
         del st.session_state.user_id
         st.rerun()
     _sb_mobile = st.session_state.layout_mode == 'mobile'
-    if col_mode.button("💻 PC" if _sb_mobile else "📱 모바일",
+    if col_mode.button("💻 PC 버전으로 전환" if _sb_mobile else "📱 모바일 버전으로 전환",
                        use_container_width=True, key="sb_mode_toggle"):
         st.session_state.layout_mode = 'pc' if _sb_mobile else 'mobile'
         st.rerun()
