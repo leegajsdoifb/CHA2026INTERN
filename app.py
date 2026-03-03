@@ -1599,32 +1599,43 @@ with st.sidebar:
             if v and str(v).strip() not in ('None', '', '예비턴')
         )) if not mgr.df.empty else []
         if all_sv:
-            target_v = st.selectbox("받고 싶은 턴", all_sv, key="sim_val_sel")
-            only_v2  = st.checkbox("가능한 것만 보기", value=False, key="sim_v2")
-            with st.spinner("계산 중..."):
-                results_s2 = mgr.simulate_by_desired_dept(user, target_v)
-            if not results_s2:
-                st.info(f"**{target_v}**을(를) 받을 수 있는 조합이 없습니다.")
+            target_vs = st.multiselect("받고 싶은 과목/턴 (복수 선택 가능)", all_sv, key="sim_val_sel")
+            only_v2   = st.checkbox("가능한 것만 보기", value=False, key="sim_v2")
+            if not target_vs:
+                st.info("과목/턴을 하나 이상 선택하세요.")
             else:
-                disp_s2  = [r for r in results_s2 if r['valid']] if only_v2 else results_s2
-                valid_s2 = sum(1 for r in results_s2 if r['valid'])
-                st.caption(f"전체 {len(results_s2)}개 중 가능: **{valid_s2}개**")
-                for r in disp_s2:
-                    icon_r = "✅" if r['valid'] else "❌"
-                    col_a, col_b = st.columns([3, 1])
-                    col_a.write(f"{icon_r} **{r['partner']}**  {r['turn']}{'  ⏳' if r['has_pending'] else ''}")
-                    col_a.caption(f"나: `{r['my_val']}` → 받을 턴: `{r['partner_val']}`")
-                    if r['reasons']:
-                        col_a.caption(f"⚠️ {' / '.join(r['reasons'])}")
-                    if r['valid'] and not r['has_pending']:
-                        if col_b.button("요청", key=f"sbsim2_{r['partner']}_{r['turn']}", type="primary"):
-                            st.session_state.quick_confirm = {
-                                'receiver': r['partner'], 'turn': r['turn'],
-                                'my_val': r['my_val'], 'partner_val': r['partner_val'],
-                            }
-                            st.rerun()
-                    elif r['has_pending']:
-                        col_b.caption("⏳")
+                with st.spinner("계산 중..."):
+                    seen_s2    = set()
+                    results_s2 = []
+                    for tv in target_vs:
+                        for r in mgr.simulate_by_desired_dept(user, tv):
+                            key = (r['partner'], r['turn'])
+                            if key not in seen_s2:
+                                seen_s2.add(key)
+                                results_s2.append(r)
+                    results_s2.sort(key=lambda x: (not x['valid'], x['turn'], x['partner']))
+                if not results_s2:
+                    st.info("선택한 과목/턴을 받을 수 있는 조합이 없습니다.")
+                else:
+                    disp_s2  = [r for r in results_s2 if r['valid']] if only_v2 else results_s2
+                    valid_s2 = sum(1 for r in results_s2 if r['valid'])
+                    st.caption(f"전체 {len(results_s2)}개 중 가능: **{valid_s2}개**")
+                    for r in disp_s2:
+                        icon_r = "✅" if r['valid'] else "❌"
+                        col_a, col_b = st.columns([3, 1])
+                        col_a.write(f"{icon_r} **{r['partner']}**  {r['turn']}{'  ⏳' if r['has_pending'] else ''}")
+                        col_a.caption(f"나: `{r['my_val']}` → 받을 턴: `{r['partner_val']}`")
+                        if r['reasons']:
+                            col_a.caption(f"⚠️ {' / '.join(r['reasons'])}")
+                        if r['valid'] and not r['has_pending']:
+                            if col_b.button("요청", key=f"sbsim2_{r['partner']}_{r['turn']}", type="primary"):
+                                st.session_state.quick_confirm = {
+                                    'receiver': r['partner'], 'turn': r['turn'],
+                                    'my_val': r['my_val'], 'partner_val': r['partner_val'],
+                                }
+                                st.rerun()
+                        elif r['has_pending']:
+                            col_b.caption("⏳")
 
     else:  # 🔗 복합 교환 탐색
         st.caption("2~3개 턴을 동시에 교환하는 조합을 탐색합니다.")
@@ -1638,23 +1649,26 @@ with st.sidebar:
             for v in mgr.df[col].dropna()
             if v and str(v).strip() not in ('None', '', '예비턴')
         )) if not mgr.df.empty else []
-        want_dept_chain = st.selectbox("받고 싶은 턴", all_sv_chain, key="chain_dept_sel")
+        want_depts_chain = st.multiselect("받고 싶은 과목/턴 (복수 선택 가능)", all_sv_chain, key="chain_dept_sel")
 
         max_sw = st.radio("최대 교환 수", [2, 3], index=0, horizontal=True, key="sim_max_sw")
 
         if st.button("🔍 복합 탐색", type="primary", key="btn_chain_search"):
-            with st.spinner("복합 교환 탐색 중... (잠시 기다려주세요)"):
-                # 단독으로 불가능한 조합만 탐색 (only_need_multi 항상 True)
-                all_chain = mgr.simulate_multi_swap(user, only_need_multi=True, max_swaps=max_sw)
-            # 선택한 과목을 받는 조합만 필터 (partner_val 이 원하는 과목인 swap 포함)
-            filtered = [c for c in all_chain
-                        if any(s['partner_val'] == want_dept_chain for s in c['swaps'])]
-            st.session_state.chain_results = filtered
+            if not want_depts_chain:
+                st.warning("과목/턴을 하나 이상 선택하세요.")
+            else:
+                with st.spinner("복합 교환 탐색 중... (잠시 기다려주세요)"):
+                    all_chain = mgr.simulate_multi_swap(user, only_need_multi=True, max_swaps=max_sw)
+                # 선택한 과목 중 하나라도 받는 조합 필터
+                filtered = [c for c in all_chain
+                            if any(s['partner_val'] in want_depts_chain for s in c['swaps'])]
+                st.session_state.chain_results = filtered
 
         chain_res = st.session_state.chain_results
         if chain_res is not None:
             if not chain_res:
-                st.info(f"**{want_dept_chain}** 을(를) 받을 수 있는 복합 교환 조합이 없습니다.")
+                label = ', '.join(f'**{v}**' for v in (want_depts_chain or []))
+                st.info(f"{label} 을(를) 받을 수 있는 복합 교환 조합이 없습니다.")
             else:
                 st.caption(f"가능한 복합 교환 조합: **{len(chain_res)}개**")
                 for idx, combo in enumerate(chain_res):
