@@ -655,8 +655,14 @@ class DataManager:
         """
         mandatory_exchanges([{target, turn}])를 반드시 포함하면서,
         거기에 1~2개의 추가 교환을 더해 조건이 충족되는 조합을 탐색.
+
+        추가 교환 종류:
+          1) sender ↔ 제3자  (기존: sender 추가 교환)
+          2) 필수 상대방 ↔ 제3자  (신규: 상대방이 조건 충족을 위해 제3자와 교환)
+
         Returns: [{'additional': [...], 'all_swaps': [...]}]
-          each swap_dict: {partner, turn, my_val, partner_val, is_additional}
+          swap_dict 공통 필드: {partner, turn, my_val, partner_val, is_additional}
+          보완 교환 추가 필드: {is_partner_comp: True, comp_owner: str}
         """
         if sender not in self.df.index:
             return []
@@ -681,9 +687,10 @@ class DataManager:
         if not mandatory_swaps:
             return []
 
-        mandatory_turns = {s['turn'] for s in mandatory_swaps}
+        mandatory_turns    = {s['turn']    for s in mandatory_swaps}
+        mandatory_partners = {s['partner'] for s in mandatory_swaps}
 
-        # 추가 후보 풀: 필수 교환의 턴을 제외한 모든 (partner, turn)
+        # ── 후보 풀 1: sender ↔ 제3자 (기존) ─────────────────────────────────
         add_candidates = []
         for partner in self.df.index:
             if partner == sender:
@@ -699,34 +706,64 @@ class DataManager:
                     'partner': partner, 'turn': t,
                     'my_val': mv, 'partner_val': pv,
                     'is_additional': True,
+                    'is_partner_comp': False,
                 })
+
+        # ── 후보 풀 2: 필수 상대방 ↔ 제3자 (신규 보완 교환) ──────────────────
+        for mpartner in mandatory_partners:
+            for third in self.df.index:
+                if third in (sender, mpartner):
+                    continue
+                for t in self.df.columns:
+                    if t in LOCKED_TURNS or t in mandatory_turns:
+                        continue
+                    mv = self.df.loc[mpartner, t]
+                    pv = self.df.loc[third, t]
+                    if not mv or not pv or mv == pv:
+                        continue
+                    add_candidates.append({
+                        'partner': third, 'turn': t,
+                        'my_val': mv, 'partner_val': pv,
+                        'is_additional': True,
+                        'is_partner_comp': True,
+                        'comp_owner': mpartner,
+                    })
 
         results = []
 
+        def get_person_a(s):
+            return s.get('comp_owner', sender)
+
         def check_combo(additional_list):
             all_swaps = mandatory_swaps + additional_list
-            # 같은 턴 중복 불가
-            turns_used = [s['turn'] for s in all_swaps]
-            if len(set(turns_used)) != len(turns_used):
-                return None
-            # sender 검증
-            sa = self.df.loc[sender].copy()
+
+            # 각 사람이 동일 턴에 두 번 교환하는 경우 방지
+            person_turn_used = set()
             for s in all_swaps:
-                sa[s['turn']] = s['partner_val']
-            v_me, _ = self.validate_intern(sender, sa)
-            if not v_me:
-                return None
-            # 각 partner 검증
-            partner_changes = {}
-            for s in all_swaps:
-                partner_changes.setdefault(s['partner'], []).append(s)
-            for pt, pswaps in partner_changes.items():
-                sb = self.df.loc[pt].copy()
-                for s in pswaps:
-                    sb[s['turn']] = s['my_val']
-                v_p, _ = self.validate_intern(pt, sb)
-                if not v_p:
+                pa, pb, t = get_person_a(s), s['partner'], s['turn']
+                if (pa, t) in person_turn_used or (pb, t) in person_turn_used:
                     return None
+                person_turn_used.add((pa, t))
+                person_turn_used.add((pb, t))
+
+            # 모든 관련자의 스케줄을 원본에서 시작해 교환 적용
+            schedules = {}
+            for s in all_swaps:
+                for p in (get_person_a(s), s['partner']):
+                    if p not in schedules:
+                        schedules[p] = self.df.loc[p].copy()
+            for s in all_swaps:
+                pa, pb, t = get_person_a(s), s['partner'], s['turn']
+                va, vb = schedules[pa][t], schedules[pb][t]
+                schedules[pa][t] = vb
+                schedules[pb][t] = va
+
+            # 모든 관련자 검증
+            for name, sched in schedules.items():
+                v, _ = self.validate_intern(name, sched)
+                if not v:
+                    return None
+
             return {'additional': additional_list, 'all_swaps': all_swaps}
 
         # 추가 1개
@@ -1212,11 +1249,11 @@ st.markdown("""
 
 /* 모바일: 전체 너비 활용 */
 @media (max-width: 767px) {
-    /* 메인 콘텐츠 패딩 최소화 */
+    /* 메인 콘텐츠 패딩 */
     .block-container {
         padding-left: 0.75rem !important;
         padding-right: 0.75rem !important;
-        padding-top: 1rem !important;
+        padding-top: 3.5rem !important;
         max-width: 100% !important;
     }
     /* 컬럼 내부 간격 줄이기 */
@@ -1284,6 +1321,8 @@ if 'user_id' not in st.session_state:
             if input_id in mgr.df.index:
                 if mgr.check_password(input_id, input_pw):
                     st.session_state.user_id = input_id
+                    if input_pw == '1234':
+                        st.session_state.force_pw_change = True
                     st.rerun()
                 else:
                     st.error("비밀번호가 틀렸습니다.")
@@ -1292,6 +1331,31 @@ if 'user_id' not in st.session_state:
     st.stop()
 
 user = st.session_state.user_id
+
+# ── 첫 로그인: 비밀번호 변경 강제 안내 ──────────────────────────────────────
+if st.session_state.get('force_pw_change'):
+    st.title("🔑 비밀번호 변경")
+    st.warning("⚠️ 초기 비밀번호(1234)를 사용 중입니다. 보안을 위해 비밀번호를 변경해주세요.")
+    fp1 = st.text_input("새 비밀번호 (4자 이상)", type="password", key="fp_pw1")
+    fp2 = st.text_input("비밀번호 확인",          type="password", key="fp_pw2")
+    c_skip, c_change = st.columns(2)
+    if c_skip.button("나중에 변경", use_container_width=True):
+        st.session_state.force_pw_change = False
+        st.rerun()
+    if c_change.button("✅ 변경하기", type="primary", use_container_width=True):
+        if len(fp1) < 4:
+            st.error("4자 이상이어야 합니다.")
+        elif fp1 != fp2:
+            st.error("비밀번호가 일치하지 않습니다.")
+        else:
+            ok, msg = mgr.update_password_in_sheet(user, fp1)
+            if ok:
+                st.session_state.force_pw_change = False
+                st.success("✅ 비밀번호가 변경되었습니다!")
+                st.rerun()
+            else:
+                st.error(msg)
+    st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR
@@ -1816,19 +1880,30 @@ if st.session_state.exchange_items:
                 for ci, combo in enumerate(page_combos):
                     global_idx = start + ci
                     all_swaps  = combo['all_swaps']
-                    lines = []
+                    lines        = []
+                    sender_swaps = []   # 내가 직접 신청하는 교환만
                     for s in all_swaps:
-                        tag = "➕ 추가" if s.get('is_additional') else "✓ 선택됨"
-                        lines.append(
-                            f"**{tag}** **{s['turn']}** &nbsp;"
-                            f"나: `{s['my_val']}` ↔ **{s['partner']}**: `{s['partner_val']}`"
-                        )
+                        if s.get('is_partner_comp'):
+                            # 상대방이 제3자와 하는 보완 교환
+                            owner = s['comp_owner']
+                            lines.append(
+                                f"🔄 **보완** **{s['turn']}** &nbsp;"
+                                f"**{owner}**: `{s['my_val']}` ↔ **{s['partner']}**: `{s['partner_val']}`"
+                                f"  _({owner}↔{s['partner']} 별도 합의 필요)_"
+                            )
+                        else:
+                            tag = "➕ 추가" if s.get('is_additional') else "✓ 선택됨"
+                            lines.append(
+                                f"**{tag}** **{s['turn']}** &nbsp;"
+                                f"나: `{s['my_val']}` ↔ **{s['partner']}**: `{s['partner_val']}`"
+                            )
+                            sender_swaps.append(s)
                     cc1, cc2 = st.columns([5, 1])
                     cc1.write("  \n".join(lines))
-                    if cc2.button("⬆️ 설정", key=f"cset_{global_idx}",
+                    if sender_swaps and cc2.button("⬆️ 설정", key=f"cset_{global_idx}",
                                   use_container_width=True, help="이 조합으로 교환 항목 설정"):
                         st.session_state.exchange_items = []
-                        for s in all_swaps:
+                        for s in sender_swaps:   # 내 교환만 설정
                             st.session_state.exchange_items.append({
                                 'id':     st.session_state.ei_counter,
                                 'target': s['partner'],
