@@ -1341,6 +1341,7 @@ if 'user_id' not in st.session_state:
         input_id = st.text_input("이름 (예: 이규)", placeholder="이름 입력")
         input_pw = st.text_input("비밀번호 (기본: 1234)", type="password")
         if st.button("로그인", type="primary"):
+            input_id = input_id.strip()
             if input_id == 'ADMIN':
                 admin_pw = mgr.passwords.get('ADMIN', '1234')
                 if input_pw == admin_pw:
