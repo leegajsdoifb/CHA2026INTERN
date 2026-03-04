@@ -2693,8 +2693,8 @@ if user == 'ADMIN':
                                     if tg.get('suggestion'):
                                         st.info(f"💡 **제안**: {tg['suggestion']}")
 
-                # 확정 / 취소 버튼
-                col_ok, col_cancel = st.columns(2)
+                # 확정 / 다시 돌리기 / 취소 버튼
+                col_ok, col_retry, col_cancel = st.columns(3)
                 assignable = summary['ok_count'] + summary['partial_count']
                 with col_ok:
                     if st.button(f"✅ 확정 적용 ({assignable}명)",
@@ -2704,6 +2704,13 @@ if user == 'ADMIN':
                         with st.spinner("휴가 배정 확정 적용 중..."):
                             apply_results = mgr.apply_vacation_preview(preview)
                         st.session_state.vacation_preview = None
+                        st.rerun()
+                with col_retry:
+                    if st.button("🔄 다시 돌리기", use_container_width=True,
+                                 key="adm_retry_preview"):
+                        with st.spinner("다시 랜덤 배정 중..."):
+                            new_preview = mgr.preview_vacation_assignments()
+                        st.session_state.vacation_preview = new_preview
                         st.rerun()
                 with col_cancel:
                     if st.button("🔙 취소", use_container_width=True,
