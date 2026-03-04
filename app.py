@@ -29,7 +29,7 @@ LOCKED_TURNS     = {'1턴', '2턴'}   # 교환 불가 턴
 VACATION_PERIOD_1  = {'4턴', '5턴', '6턴', '7턴'}   # 1차 휴가 기간
 VACATION_PERIOD_2  = {'8턴', '9턴', '10턴', '11턴'} # 2차 휴가 기간
 VACATION_TYPES     = ['A1','A2','A3','A4','B1','B2','B3','B4','C1','C2','C3','C4']
-# A = IM 과 휴가 / B = EMC 과 휴가 / C = IM·EMC 외 분당 과 또는 파견병원 휴가
+# A = IM(분당) 휴가 / B = EMC(분당) 휴가 / C = IM·EMC 외 분당 과 또는 파견병원 휴가 (A·B는 대체근무 세트)
 BUNDANG_MIN_TURNS  = 7   # 분당 근무 최소 턴 수 (전체 13개 중)
 
 HISTORY_HEADER = ['날짜시간', '신청자', '상대방', '교환턴',
@@ -349,6 +349,22 @@ class DataManager:
             if not v1: reasons.append(f"{poster}: {', '.join(sorted(m1))} 누락")
             if not v2: reasons.append(f"나: {', '.join(sorted(m2))} 누락")
 
+            # 휴가 규칙 검증
+            ok_vac, vac_errs = self.validate_vacation_exchange(poster, viewer, t)
+            if not ok_vac:
+                valid = False
+                reasons.extend(vac_errs)
+
+            # 분당 근무 검증
+            b1 = self.validate_bundang(poster, sa)
+            b2 = self.validate_bundang(viewer, sb)
+            if not b1:
+                valid = False
+                reasons.append(f"{poster}: 분당 근무 부족")
+            if not b2:
+                valid = False
+                reasons.append(f"나: 분당 근무 부족")
+
             has_pending = any(
                 r['sender'] == viewer and r['receiver'] == poster
                 and r['turn'] == t and r['status'] == 'pending'
@@ -435,6 +451,22 @@ class DataManager:
             if not v1: reasons.append(f"나: {', '.join(sorted(m1))} 누락")
             if not v2: reasons.append(f"{partner}: {', '.join(sorted(m2))} 누락")
 
+            # 휴가 규칙 검증
+            ok_vac, vac_errs = self.validate_vacation_exchange(name, partner, turn)
+            if not ok_vac:
+                valid = False
+                reasons.extend(vac_errs)
+
+            # 분당 근무 검증
+            b1 = self.validate_bundang(name, sched_a)
+            b2 = self.validate_bundang(partner, sched_b)
+            if not b1:
+                valid = False
+                reasons.append(f"나: 분당 근무 부족")
+            if not b2:
+                valid = False
+                reasons.append(f"{partner}: 분당 근무 부족")
+
             has_pending = any(
                 r['sender'] == name and r['receiver'] == partner
                 and r['turn'] == turn and r['status'] == 'pending'
@@ -483,6 +515,23 @@ class DataManager:
                 reasons = []
                 if not v1: reasons.append(f"나: {', '.join(sorted(m1))} 누락")
                 if not v2: reasons.append(f"{partner}: {', '.join(sorted(m2))} 누락")
+
+                # 휴가 규칙 검증
+                ok_vac, vac_errs = self.validate_vacation_exchange(name, partner, t)
+                if not ok_vac:
+                    valid = False
+                    reasons.extend(vac_errs)
+
+                # 분당 근무 검증
+                b1 = self.validate_bundang(name, sa)
+                b2 = self.validate_bundang(partner, sb)
+                if not b1:
+                    valid = False
+                    reasons.append(f"나: 분당 근무 부족")
+                if not b2:
+                    valid = False
+                    reasons.append(f"{partner}: 분당 근무 부족")
+
                 has_pending = any(
                     r['sender'] == name and r['receiver'] == partner
                     and r['turn'] == t and r['status'] == 'pending'
@@ -493,14 +542,20 @@ class DataManager:
                                 'reasons': reasons, 'has_pending': has_pending})
         return sorted(results, key=lambda x: (not x['valid'], x['turn'], x['partner']))
 
-    def simulate_multi_swap(self, name, only_need_multi=True, max_swaps=3):
+    def simulate_multi_swap(self, name, only_need_multi=True, max_swaps=3,
+                            target_vals=None, allowed_turns=None):
         """
         2~max_swaps개 턴을 동시에 교환할 때 유효한 모든 조합을 탐색.
         only_need_multi=True: 단독으로는 불가하지만 조합으로만 가능한 경우만 반환.
+        target_vals: set/list — 결과 중 하나 이상의 swap이 이 값을 받는 조합만 반환.
+        allowed_turns: set/list — 이 턴들만 교환 후보로 사용.
         Returns: [{'swaps': [swap_dict, ...], 'alone': [bool, ...], 'needs_multi': bool}]
         """
         if name not in self.df.index:
             return []
+
+        target_set = set(target_vals) if target_vals else None
+        turn_set   = set(allowed_turns) if allowed_turns else None
 
         # 후보 수집: (partner, turn, my_val, partner_val)
         candidates = []
@@ -509,6 +564,8 @@ class DataManager:
                 continue
             for t in self.df.columns:
                 if t in LOCKED_TURNS:
+                    continue
+                if turn_set and t not in turn_set:
                     continue
                 my_val      = self.df.loc[name, t]
                 partner_val = self.df.loc[partner, t]
@@ -520,7 +577,7 @@ class DataManager:
         if not candidates:
             return []
 
-        # 단일 교환 유효 여부 미리 계산
+        # 단일 교환 유효 여부 미리 계산 (필수과목 + 분당 + 휴가)
         single_valid = {}
         for c in candidates:
             key = (c['partner'], c['turn'])
@@ -530,7 +587,10 @@ class DataManager:
             sb = self.df.loc[c['partner']].copy();  sb[c['turn']] = c['my_val']
             v1, _ = self.validate_intern(name,         sa)
             v2, _ = self.validate_intern(c['partner'], sb)
-            single_valid[key] = v1 and v2
+            ok_vac, _ = self.validate_vacation_exchange(name, c['partner'], c['turn'])
+            b1 = self.validate_bundang(name, sa)
+            b2 = self.validate_bundang(c['partner'], sb)
+            single_valid[key] = v1 and v2 and ok_vac and b1 and b2
 
         results = []
         n = len(candidates)
@@ -542,12 +602,21 @@ class DataManager:
             turns_used = [s['turn'] for s in swaps]
             if len(set(turns_used)) != len(turns_used):
                 return None
+
+            # 휴가 규칙 검증 (각 swap별)
+            for s in swaps:
+                ok_vac, _ = self.validate_vacation_exchange(name, s['partner'], s['turn'])
+                if not ok_vac:
+                    return None
+
             # 나의 스케줄 시뮬레이션
             sa = self.df.loc[name].copy()
             for s in swaps:
                 sa[s['turn']] = s['partner_val']
             v_me, _ = self.validate_intern(name, sa)
             if not v_me:
+                return None
+            if not self.validate_bundang(name, sa):
                 return None
             # 각 파트너의 스케줄 시뮬레이션
             partner_changes = {}
@@ -559,6 +628,8 @@ class DataManager:
                     sb[s['turn']] = s['my_val']
                 v_p, _ = self.validate_intern(partner, sb)
                 if not v_p:
+                    return None
+                if not self.validate_bundang(partner, sb):
                     return None
             # alone 체크: 조합 내 모든 교환이 단독으로도 가능하면 복합 불필요 → 제외
             alone_list = [single_valid.get((s['partner'], s['turn']), False) for s in swaps]
@@ -588,8 +659,17 @@ class DataManager:
                         result = check_combo([i, j, k])
                         if result:
                             results.append(result)
-                            if len(results) >= 100:  # 결과 상한
-                                return results
+                            if len(results) >= 200:  # 결과 상한
+                                break
+                    if len(results) >= 200:
+                        break
+                if len(results) >= 200:
+                    break
+
+        # target_vals 필터: 하나 이상의 swap이 원하는 값을 받는 조합만
+        if target_set:
+            results = [r for r in results
+                       if any(s['partner_val'] in target_set for s in r['swaps'])]
 
         return results
 
@@ -637,12 +717,15 @@ class DataManager:
             })
 
         # 체인 전체에 대해 사전 검증 (동시에 모든 교환이 이뤄진다고 가정)
+        # 필수과목 검증
         sa = self.df.loc[sender].copy()
         for r in created_reqs:
             sa[r['turn']] = r['val_receiver']
         v_me, m_me = self.validate_intern(sender, sa)
         if not v_me:
             return False, f"⚠️ 복합 교환 시 필수과목 위반 (나: {', '.join(sorted(m_me))} 누락)"
+        if not self.validate_bundang(sender, sa):
+            return False, f"⚠️ 복합 교환 시 분당 근무 부족 (나)"
 
         partner_changes = {}
         for r in created_reqs:
@@ -654,6 +737,14 @@ class DataManager:
             v_p, m_p = self.validate_intern(partner, sb)
             if not v_p:
                 return False, f"⚠️ {partner}의 필수과목 위반 ({', '.join(sorted(m_p))} 누락)"
+            if not self.validate_bundang(partner, sb):
+                return False, f"⚠️ {partner}의 분당 근무 부족"
+
+        # 휴가 규칙 검증
+        for r in created_reqs:
+            ok_vac, vac_errs = self.validate_vacation_exchange(sender, r['receiver'], r['turn'])
+            if not ok_vac:
+                return False, "\n".join(vac_errs)
 
         self.requests.extend(created_reqs)
         self.save_db()
@@ -718,30 +809,7 @@ class DataManager:
                     'is_partner_comp': False,
                 })
 
-        # ── 후보 풀 2: 필수 상대방 ↔ 제3자 (신규 보완 교환) ──────────────────
-        for mpartner in mandatory_partners:
-            for third in self.df.index:
-                if third in (sender, mpartner):
-                    continue
-                for t in self.df.columns:
-                    if t in LOCKED_TURNS or t in mandatory_turns:
-                        continue
-                    mv = self.df.loc[mpartner, t]
-                    pv = self.df.loc[third, t]
-                    if not mv or not pv or mv == pv:
-                        continue
-                    add_candidates.append({
-                        'partner': third, 'turn': t,
-                        'my_val': mv, 'partner_val': pv,
-                        'is_additional': True,
-                        'is_partner_comp': True,
-                        'comp_owner': mpartner,
-                    })
-
         results = []
-
-        def get_person_a(s):
-            return s.get('comp_owner', sender)
 
         def check_combo(additional_list):
             all_swaps = mandatory_swaps + additional_list
@@ -755,22 +823,32 @@ class DataManager:
                 person_turn_used.add((pa, t))
                 person_turn_used.add((pb, t))
 
-            # 모든 관련자의 스케줄을 원본에서 시작해 교환 적용
+            # ★ 핵심: "설정" 버튼이 적용하는 부분 = 나의 교환(mandatory + pool1)만
+            #   이 부분만으로 조건이 충족돼야 실제로 쓸 수 있는 조합
+            sender_swaps = [s for s in all_swaps if not s.get('is_partner_comp')]
+
+            # 휴가 규칙 검증 (나의 교환만 — 설정 시 실제 적용되는 범위)
+            for s in sender_swaps:
+                ok_vac, _ = self.validate_vacation_exchange(sender, s['partner'], s['turn'])
+                if not ok_vac:
+                    return None
+
+            # 나의 교환만으로 스케줄 시뮬레이션 → 모든 관련자 검증
             schedules = {}
-            for s in all_swaps:
-                for p in (get_person_a(s), s['partner']):
+            for s in sender_swaps:
+                for p in (sender, s['partner']):
                     if p not in schedules:
                         schedules[p] = self.df.loc[p].copy()
-            for s in all_swaps:
-                pa, pb, t = get_person_a(s), s['partner'], s['turn']
-                va, vb = schedules[pa][t], schedules[pb][t]
-                schedules[pa][t] = vb
-                schedules[pb][t] = va
+            for s in sender_swaps:
+                va, vb = schedules[sender][s['turn']], schedules[s['partner']][s['turn']]
+                schedules[sender][s['turn']] = vb
+                schedules[s['partner']][s['turn']] = va
 
-            # 모든 관련자 검증
             for name, sched in schedules.items():
                 v, _ = self.validate_intern(name, sched)
                 if not v:
+                    return None
+                if not self.validate_bundang(name, sched):
                     return None
 
             return {'additional': additional_list, 'all_swaps': all_swaps}
@@ -846,7 +924,7 @@ class DataManager:
             if not fresh_df.empty:
                 self.df = fresh_df
 
-            # 재검증: 동시에 모든 교환이 이뤄질 때 유효한지
+            # 재검증: 동시에 모든 교환이 이뤄질 때 유효한지 (필수과목+분당+휴가)
             sa = self.df.loc[sender].copy()
             for r in chain_reqs:
                 val_b = self.df.loc[r['receiver'], r['turn']] if r['receiver'] in self.df.index else r['val_receiver']
@@ -864,11 +942,27 @@ class DataManager:
             fail_msgs = []
             if not v_me:
                 fail_msgs.append(f"{sender}: {', '.join(sorted(m_me))} 누락")
+
+            # 분당 근무 검증
+            if not self.validate_bundang(sender, sa):
+                all_valid = False
+                fail_msgs.append(f"{sender}: 분당 근무 부족")
+
             for partner, sched in partner_scheds.items():
                 v_p, m_p = self.validate_intern(partner, sched)
                 if not v_p:
                     all_valid = False
                     fail_msgs.append(f"{partner}: {', '.join(sorted(m_p))} 누락")
+                if not self.validate_bundang(partner, sched):
+                    all_valid = False
+                    fail_msgs.append(f"{partner}: 분당 근무 부족")
+
+            # 휴가 규칙 검증
+            for r in chain_reqs:
+                ok_vac, vac_errs = self.validate_vacation_exchange(sender, r['receiver'], r['turn'])
+                if not ok_vac:
+                    all_valid = False
+                    fail_msgs.extend(vac_errs)
 
             if not all_valid:
                 for r in chain_reqs:
@@ -1065,6 +1159,65 @@ class DataManager:
         missing = ESSENTIAL_DEPTS - dept_set
         return len(missing) == 0, missing
 
+    # ── 개인별 과목·파견 통계 ────────────────────────────────────────────────
+    def get_dept_counts(self, name, schedule=None, exclude_vacation=False):
+        """
+        개인별 주요 과목 및 파견 턴 수를 반환.
+        exclude_vacation=True: 휴가 배정된 턴을 제외하고 카운트.
+        Returns: dict  예) {'IM': 2, 'GS': 1, 'OB': 1, 'PE': 1, '파견': 3, ...}
+        """
+        if schedule is None:
+            if name not in self.df.index:
+                return {}
+            schedule = self.df.loc[name]
+
+        # 휴가 턴 집합
+        vac_turns = set()
+        if exclude_vacation:
+            vac = self.vacation_data.get(name, {})
+            for period in ('1차', '2차'):
+                v = vac.get(period)
+                if v and v.get('turn'):
+                    vac_turns.add(v['turn'])
+
+        dept_cnt = {}
+        dispatch_cnt = 0
+        for col in self.df.columns:
+            if exclude_vacation and col in vac_turns:
+                continue
+            val = schedule[col]
+            if not val or str(val) in ('None', '', 'nan'):
+                continue
+            loc, dept = self.parse_cell(val)
+            loc = loc or DEFAULT_LOCATION
+            if dept:
+                dept_cnt[dept] = dept_cnt.get(dept, 0) + 1
+            if loc in LOCATIONS:   # 일산/구미/강남 = 파견
+                dispatch_cnt += 1
+        dept_cnt['파견'] = dispatch_cnt
+        return dept_cnt
+
+    # ── 휴가 턴 라벨 도우미 ────────────────────────────────────────────────────
+    def get_vacation_turns(self, name):
+        """
+        name의 휴가 턴 집합을 반환.  {turn: period_label}
+        예) {'5턴': '1차🏖️', '9턴': '2차🏖️'}
+        """
+        result = {}
+        vac = self.vacation_data.get(name, {})
+        for period in ('1차', '2차'):
+            v = vac.get(period)
+            if v and v.get('turn'):
+                result[v['turn']] = f"{period}🏖️"
+        return result
+
+    def turn_label(self, name, turn):
+        """턴 이름 뒤에 휴가 표시를 붙여 반환. 예) '5턴🏖️'"""
+        vt = self.get_vacation_turns(name)
+        if turn in vt:
+            return f"{turn}🏖️"
+        return turn
+
     # ── 분당 근무 비율 검증 ────────────────────────────────────────────────────
     def count_bundang(self, name, schedule=None):
         """분당(기본지역) 배치 턴 수 반환"""
@@ -1104,7 +1257,8 @@ class DataManager:
     def auto_derive_vacation_turn(self, name, period, vac_group):
         """
         스케줄을 보고 휴가 배정 가능한 턴을 자동 탐지.
-        vac_group: 'A' → IM 턴 / 'B' → EMC 턴 / 'C' → IM·EMC 외 분당 과 또는 파견병원 턴
+        vac_group: 'A' → IM(분당) / 'B' → EMC(분당) / 'C' → 나머지 과
+        A·B는 대체근무 세트 (IM↔EMC 짝)
         반환: (turn: str or None, dept: str or None, error_msg: str or None)
         """
         period_turns = sorted(
@@ -1116,6 +1270,7 @@ class DataManager:
 
         target_dept = {'A': 'IM', 'B': 'EMC'}.get(vac_group)  # C → None
         candidates = []
+        fallback_candidates = []   # 외/산/소 — 후순위
 
         for t in period_turns:
             if t not in self.df.columns:
@@ -1130,35 +1285,129 @@ class DataManager:
             if dept and '진로탐색' in dept:
                 continue
 
-            if vac_group == 'C':
-                # IM·EMC 외 분당 과 OR 파견병원 배치 턴
-                if (loc == DEFAULT_LOCATION and dept not in ('IM', 'EMC')) or loc in LOCATIONS:
+            # EMC(소아) 턴은 휴가 배정 금지
+            if dept == 'EMC' and loc == '소아':
+                continue
+
+            if vac_group in ('A', 'B'):
+                # A=IM(분당), B=EMC(분당) — 파견 제외
+                if dept == target_dept and loc == DEFAULT_LOCATION:
                     candidates.append((t, dept))
             else:
-                # A=IM, B=EMC
-                if dept == target_dept:
+                # C 그룹 우선: IM·EMC·GS·OB·PE 외 분당 과 OR 파견병원 배치 턴
+                if (loc == DEFAULT_LOCATION and dept not in ('IM', 'EMC', 'GS', 'OB', 'PE')) or loc in LOCATIONS:
                     candidates.append((t, dept))
+                # C 그룹 후순위: GS/OB/PE 분당 턴
+                elif loc == DEFAULT_LOCATION and dept in ('GS', 'OB', 'PE'):
+                    fallback_candidates.append((t, dept))
+
+        # 우선 후보 없으면 외/산/소 후순위 사용
+        if not candidates and fallback_candidates:
+            candidates = fallback_candidates
 
         if not candidates:
-            dept_label = {'A': 'IM', 'B': 'EMC', 'C': 'IM·EMC외 분당 과 또는 파견병원'}.get(vac_group, '기타')
+            dept_label = {'A': 'IM(분당)', 'B': 'EMC(분당)', 'C': '기타 분당 과 또는 파견병원'}.get(vac_group, '기타')
             return None, None, (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
                                 f"{dept_label} 배치 턴이 없습니다.")
 
-        # 후보가 여럿이면 첫 번째 선택 (관리자가 나중에 수동 조정 가능)
-        turn, dept = candidates[0]
+        # 내/외/산/소 2개 이상 규칙: 휴가 제외 후 최소 1턴 남아야 함
+        ESSENTIAL_VACATION_DEPTS = ('IM', 'GS', 'OB', 'PE')
+        valid_candidates = []
+        for t, dept in candidates:
+            if dept in ESSENTIAL_VACATION_DEPTS:
+                total_dept = sum(
+                    1 for col in self.df.columns
+                    if (lambda v: (
+                        self.parse_cell(v)[1] == dept
+                        and (self.parse_cell(v)[0] or DEFAULT_LOCATION) == DEFAULT_LOCATION
+                    ) if v and str(v) not in ('None','') else False)(
+                        self.df.loc[name, col])
+                )
+                if total_dept < 2:
+                    continue  # 이 후보 건너뜀, 다음 후보 시도
+            valid_candidates.append((t, dept))
 
-        # IM/EMC 2개 이상 규칙
-        if dept in ('IM', 'EMC'):
-            total_dept = sum(
-                1 for col in self.df.columns
-                if (lambda v: self.parse_cell(v)[1] if v and str(v) not in ('None','') else None)(
-                    self.df.loc[name, col]) == dept
-            )
-            if total_dept < 2:
-                return None, None, (f"{name}의 {dept}이 전체 {total_dept}개뿐이라 "
-                                    f"휴가로 사용할 수 없습니다 (최소 2개 필요).")
+        if not valid_candidates:
+            return None, None, (f"{name}의 {period} 기간에 휴가 가능한 턴이 없습니다 "
+                                f"(내/외/산/소는 최소 2개 필요).")
 
+        turn, dept = valid_candidates[0]
         return turn, dept, None
+
+    def _get_all_vacation_candidates(self, name, period, vac_group):
+        """
+        auto_derive_vacation_turn과 동일 로직이지만 모든 유효 후보 턴을 반환.
+        반환: (candidates: [(turn, dept)], error_msg: str|None)
+        """
+        period_turns = sorted(
+            VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
+            key=lambda x: int(x.replace('턴', ''))
+        )
+        if name not in self.df.index:
+            return [], f"{name}을(를) 스케줄에서 찾을 수 없습니다."
+
+        target_dept = {'A': 'IM', 'B': 'EMC'}.get(vac_group)  # C → None
+        candidates = []
+        fallback_candidates = []   # 외/산/소 — 후순위
+
+        for t in period_turns:
+            if t not in self.df.columns:
+                continue
+            val = self.df.loc[name, t]
+            if not val or str(val) in ('None', '', 'nan'):
+                continue
+            loc, dept = self.parse_cell(val)
+            loc = loc or DEFAULT_LOCATION
+            if dept and '진로탐색' in dept:
+                continue
+
+            # EMC(소아) 턴은 휴가 배정 금지
+            if dept == 'EMC' and loc == '소아':
+                continue
+
+            if vac_group in ('A', 'B'):
+                # A=IM(분당), B=EMC(분당) — 파견 제외
+                if dept == target_dept and loc == DEFAULT_LOCATION:
+                    candidates.append((t, dept))
+            else:
+                # C 그룹 우선: IM·EMC·GS·OB·PE 외 분당 과 OR 파견병원 배치 턴
+                if (loc == DEFAULT_LOCATION and dept not in ('IM', 'EMC', 'GS', 'OB', 'PE')) or loc in LOCATIONS:
+                    candidates.append((t, dept))
+                # C 그룹 후순위: GS/OB/PE 분당 턴
+                elif loc == DEFAULT_LOCATION and dept in ('GS', 'OB', 'PE'):
+                    fallback_candidates.append((t, dept))
+
+        # 우선 후보 없으면 외/산/소 후순위 사용
+        if not candidates and fallback_candidates:
+            candidates = fallback_candidates
+
+        if not candidates:
+            dept_label = {'A': 'IM(분당)', 'B': 'EMC(분당)', 'C': '기타 분당 과 또는 파견병원'}.get(vac_group, '기타')
+            return [], (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
+                        f"{dept_label} 배치 턴이 없습니다.")
+
+        # 내/외/산/소 2개 이상 규칙: 휴가 제외 후 최소 1턴 남아야 함
+        ESSENTIAL_VACATION_DEPTS = ('IM', 'GS', 'OB', 'PE')
+        valid_candidates = []
+        for t, dept in candidates:
+            if dept in ESSENTIAL_VACATION_DEPTS:
+                total_dept = sum(
+                    1 for col in self.df.columns
+                    if (lambda v: (
+                        self.parse_cell(v)[1] == dept
+                        and (self.parse_cell(v)[0] or DEFAULT_LOCATION) == DEFAULT_LOCATION
+                    ) if v and str(v) not in ('None','') else False)(
+                        self.df.loc[name, col])
+                )
+                if total_dept < 2:
+                    continue
+            valid_candidates.append((t, dept))
+
+        if not valid_candidates:
+            return [], (f"{name}의 {period} 기간에 휴가 가능한 턴이 없습니다 "
+                        f"(내/외/산/소는 최소 2개 필요).")
+
+        return valid_candidates, None
 
     def set_intern_vacation(self, name, period, vac_type):
         """
@@ -1192,47 +1441,71 @@ class DataManager:
         """
         모든 인턴 휴가 자동 배정 (1차·2차 각각).
         우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
-        A1-A4 = 한 턴 내 1-4주차. 같은 턴+그룹의 인턴끼리 주차를 자동 분배.
+        턴별·주차별 부하를 고루 분배하여 배정.
         반환: [{'name': str, 'success': [msg,...], 'errors': [msg,...]}]
         """
-        # ── 1단계: 각 인턴×기간 별 (턴, 그룹) 결정 ─────────────────────
-        # slot_map[period][(turn, prefix)] = [(name, dept), ...]
-        slot_map = {'1차': {}, '2차': {}}
-        no_match = []  # (name, period)
-
-        for name in self.df.index:
-            for period in ('1차', '2차'):
-                found = False
-                for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
-                    t, dept, err = self.auto_derive_vacation_turn(name, period, group)
-                    if t:
-                        key = (t, prefix)
-                        slot_map[period].setdefault(key, []).append((name, dept))
-                        found = True
-                        break
-                if not found:
-                    no_match.append((name, period))
-
-        # ── 2단계: 같은 (턴, 그룹) 인턴끼리 1-4주차 순차 배정 ─────────
         results = {name: {'name': name, 'success': [], 'errors': []}
                    for name in self.df.index}
 
-        for period, groups in slot_map.items():
-            for (turn, prefix), interns in groups.items():
-                for idx, (name, dept) in enumerate(interns):
-                    week = (idx % 4) + 1          # 1,2,3,4 순환
-                    vac_type = f"{prefix}{week}"   # A1, A2, ...
+        for period in ('1차', '2차'):
+            turn_load = {}   # {turn: count} – 이번 기간 턴별 배정 인원
+            week_load = {1: 0, 2: 0, 3: 0, 4: 0}  # 전역 주차별 배정 인원
 
-                    ok, msg = self.set_intern_vacation(name, period, vac_type)
-                    if ok:
-                        results[name]['success'].append(msg)
-                    else:
-                        results[name]['errors'].append(msg)
+            # ── 0단계: 기존 배정 반영 (수동 배정 등) ──────────────────
+            for nm in self.df.index:
+                vac = self.vacation_data.get(nm, {}).get(period)
+                if vac and vac.get('turn') and vac.get('type'):
+                    t = vac['turn']
+                    turn_load[t] = turn_load.get(t, 0) + 1
+                    wk = int(vac['type'][-1]) if vac['type'][-1].isdigit() else 0
+                    if 1 <= wk <= 4:
+                        week_load[wk] += 1
 
-        # 미매칭 인턴 에러 기록
-        for name, period in no_match:
-            results[name]['errors'].append(
-                f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
+            slot_map  = {}   # {(turn, prefix): [(name, dept)]}
+
+            # ── 1단계: 후보 수집 + 그룹 결정 ───────────────────────
+            assignable = []  # [(name, prefix, candidates)]
+            for name in self.df.index:
+                placed = False
+                for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
+                    cands, err = self._get_all_vacation_candidates(name, period, group)
+                    if cands:
+                        assignable.append((name, prefix, cands))
+                        placed = True
+                        break
+                if not placed:
+                    results[name]['errors'].append(
+                        f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
+
+            # ── 2단계: 랜덤 셔플 + 제약 많은 인턴 우선 배정 ─────────
+            import random
+            random.shuffle(assignable)  # 먼저 랜덤 섞기
+            assignable.sort(key=lambda x: len(x[2]))  # 후보 적은 순 (동률은 랜덤)
+            for name, prefix, cands in assignable:
+                # 최소 부하 턴 후보 중 랜덤 선택 (동률 분산)
+                min_load = min(turn_load.get(c[0], 0) for c, _ in [(c, None) for c in cands])
+                min_cands = [(t, d) for t, d in cands if turn_load.get(t, 0) == min_load]
+                best_turn, best_dept = random.choice(min_cands)
+                turn_load[best_turn] = turn_load.get(best_turn, 0) + 1
+                slot_map.setdefault((best_turn, prefix), []).append((name, best_dept))
+
+            # ── 3단계: 주차 배정 — 전역 주차 부하 균등 + 랜덤 ───────
+            all_to_assign = []
+            for (turn, prefix), interns in slot_map.items():
+                for name, dept in interns:
+                    all_to_assign.append((turn, prefix, name, dept))
+            random.shuffle(all_to_assign)
+            for turn, prefix, name, dept in all_to_assign:
+                min_wl = min(week_load.values())
+                min_weeks = [w for w in range(1, 5) if week_load[w] == min_wl]
+                best_week = random.choice(min_weeks)
+                vac_type = f"{prefix}{best_week}"
+                week_load[best_week] += 1
+                ok, msg = self.set_intern_vacation(name, period, vac_type)
+                if ok:
+                    results[name]['success'].append(msg)
+                else:
+                    results[name]['errors'].append(msg)
 
         return list(results.values())
 
@@ -1285,30 +1558,38 @@ class DataManager:
     def preview_vacation_assignments(self):
         """
         전체 인턴 휴가 자동 배정 미리보기 (저장 안 함).
-        모든 그룹(A→B→C) 시도 결과 수집, 실패 시 사유+해결 제안 포함.
+        턴별·주차별 부하를 고루 분배. 실패 시 사유+해결 제안 포함.
         """
         from datetime import datetime as _dt
         GROUP_LABELS = {'A': 'IM', 'B': 'EMC', 'C': 'IM·EMC외 분당/파견'}
 
-        # ── 1단계: 각 인턴×기간 별 (턴, 그룹) 결정 ───────────────
-        slot_map = {'1차': {}, '2차': {}}
-        intern_asgn = {}
+        intern_asgn = {name: {} for name in self.df.index}
 
-        for name in self.df.index:
-            intern_asgn[name] = {}
-            for period in ('1차', '2차'):
-                found = False
+        for period in ('1차', '2차'):
+            turn_load = {}   # {turn: count}
+            week_load = {1: 0, 2: 0, 3: 0, 4: 0}  # 전역 주차별 배정 인원
+            slot_map  = {}   # {(turn, prefix): [(name, dept)]}
+
+            # ── 0단계: 기존 배정 반영 (수동 배정 등) ──────────────
+            for nm in self.df.index:
+                vac = self.vacation_data.get(nm, {}).get(period)
+                if vac and vac.get('turn') and vac.get('type'):
+                    t = vac['turn']
+                    turn_load[t] = turn_load.get(t, 0) + 1
+                    wk = int(vac['type'][-1]) if vac['type'][-1].isdigit() else 0
+                    if 1 <= wk <= 4:
+                        week_load[wk] += 1
+
+            # ── 1단계: 후보 수집 + 그룹 결정 ─────────────────────
+            assignable = []  # [(name, prefix, candidates)]
+            for name in self.df.index:
+                placed = False
                 tried = []
                 for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
-                    t, dept, err = self.auto_derive_vacation_turn(name, period, group)
-                    if t:
-                        slot_map[period].setdefault((t, prefix), []).append((name, dept))
-                        intern_asgn[name][period] = {
-                            'status': 'ok', 'turn': t, 'dept': dept,
-                            'group': prefix, 'vac_type': None, 'week': None,
-                            'tried_groups': [],
-                        }
-                        found = True
+                    cands, err = self._get_all_vacation_candidates(name, period, group)
+                    if cands:
+                        assignable.append((name, prefix, cands))
+                        placed = True
                         break
                     else:
                         tried.append({
@@ -1317,25 +1598,50 @@ class DataManager:
                             'error': err or '',
                             'suggestion': self._generate_suggestion(name, period, group, err),
                         })
-                if not found:
+                if not placed:
                     intern_asgn[name][period] = {
                         'status': 'fail', 'turn': None, 'dept': None,
                         'group': None, 'vac_type': None, 'week': None,
                         'tried_groups': tried,
                     }
 
-        # ── 2단계: 주차 배정 ─────────────────────────────────────
-        for period, groups in slot_map.items():
-            for (turn, prefix), interns in groups.items():
-                for idx, (name, dept) in enumerate(interns):
-                    week = (idx % 4) + 1
-                    vac_type = f"{prefix}{week}"
-                    a = intern_asgn[name][period]
-                    if a['status'] == 'ok':
-                        a['vac_type'] = vac_type
-                        a['week'] = week
+            # ── 2단계: 랜덤 셔플 + 제약 많은 인턴 우선 배정 ─────
+            import random
+            random.shuffle(assignable)
+            assignable.sort(key=lambda x: len(x[2]))  # 후보 적은 순 (동률은 랜덤)
+            for name, prefix, cands in assignable:
+                # 최소 부하 턴 후보 중 랜덤 선택
+                min_load = min(turn_load.get(c[0], 0) for c, _ in [(c, None) for c in cands])
+                min_cands = [(t, d) for t, d in cands if turn_load.get(t, 0) == min_load]
+                best_turn, best_dept = random.choice(min_cands)
+                turn_load[best_turn] = turn_load.get(best_turn, 0) + 1
+                slot_map.setdefault((best_turn, prefix), []).append((name, best_dept))
+                alternatives = sorted(
+                    cands, key=lambda c: turn_load.get(c[0], 0))
+                intern_asgn[name][period] = {
+                    'status': 'ok', 'turn': best_turn, 'dept': best_dept,
+                    'group': prefix, 'vac_type': None, 'week': None,
+                    'tried_groups': [],
+                    'alternatives': [(t, d) for t, d in alternatives],
+                }
 
-        # ── 3단계: 결과 정리 ─────────────────────────────────────
+            # ── 3단계: 주차 배정 — 전역 주차 부하 균등 + 랜덤 ───
+            all_to_assign = []
+            for (turn, prefix), interns in slot_map.items():
+                for name, dept in interns:
+                    all_to_assign.append((turn, prefix, name, dept))
+            random.shuffle(all_to_assign)
+            for turn, prefix, name, dept in all_to_assign:
+                min_wl = min(week_load.values())
+                min_weeks = [w for w in range(1, 5) if week_load[w] == min_wl]
+                best_week = random.choice(min_weeks)
+                vac_type = f"{prefix}{best_week}"
+                week_load[best_week] += 1
+                a = intern_asgn[name][period]
+                a['vac_type'] = vac_type
+                a['week'] = best_week
+
+        # ── 결과 정리 ─────────────────────────────────────────────
         results = []
         ok_c = partial_c = fail_c = 0
         for name in self.df.index:
@@ -1353,9 +1659,6 @@ class DataManager:
         return {
             'timestamp': _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
             'results': results,
-            'slot_map': {p: {f"{t}_{pf}": [(n, d) for n, d in v]
-                             for (t, pf), v in g.items()}
-                         for p, g in slot_map.items()},
             'summary': {
                 'total': len(results), 'ok_count': ok_c,
                 'partial_count': partial_c, 'fail_count': fail_c,
@@ -1458,12 +1761,13 @@ class DataManager:
                     ci = turn_col_map.get(turn_name)
                     if ci is None:
                         continue
-                    # 현재 셀 값 읽기 (원래 과목)
-                    original = ''
-                    data_row = all_rows[sheet_row - 1]  # 0-based
-                    if ci < len(data_row):
-                        original = data_row[ci].strip()
-                    top = original if original else '(미기재)'
+                    # 스케줄 원본에서 과목명 직접 가져오기 (시트 셀 파싱 대신)
+                    if turn_name in self.df.columns and intern in self.df.index:
+                        sched_val = self.df.loc[intern, turn_name]
+                        top = str(sched_val).strip() if sched_val and str(sched_val) not in ('None', '', 'nan') else '(미기재)'
+                    else:
+                        top = '(미기재)'
+
                     new_val = f"{top}\n{vac_type}"
                     cells_to_update.append((sheet_row, ci + 1, new_val))  # 1-based
 
@@ -1684,12 +1988,18 @@ class DataManager:
             sched_b[turn] = val_a
             v1, m1 = self.validate_intern(p1, sched_a)
             v2, m2 = self.validate_intern(p2, sched_b)
+            b1 = self.validate_bundang(p1, sched_a)
+            b2 = self.validate_bundang(p2, sched_b)
+            ok_vac, vac_errs = self.validate_vacation_exchange(p1, p2, turn)
 
-            if not v1 or not v2:
+            if not v1 or not v2 or not b1 or not b2 or not ok_vac:
                 lines = ["⚠️ 수락 시점 재검증 실패",
                          "(신청 이후 다른 교환으로 스케줄이 변경됐습니다)"]
-                if not v1: lines.append(f"• {p1}: {', '.join(sorted(m1))} 누락")
-                if not v2: lines.append(f"• {p2}: {', '.join(sorted(m2))} 누락")
+                if not v1: lines.append(f"• {p1}: 필수과목 {', '.join(sorted(m1))} 누락")
+                if not v2: lines.append(f"• {p2}: 필수과목 {', '.join(sorted(m2))} 누락")
+                if not b1: lines.append(f"• {p1}: 분당 근무 부족")
+                if not b2: lines.append(f"• {p2}: 분당 근무 부족")
+                lines.extend(vac_errs)
                 req['status'] = 'rejected'
                 self.save_db()
                 self.log_history_to_sheet(p1, p2, turn, val_a, val_b,
@@ -1969,32 +2279,76 @@ if user == 'ADMIN':
                     use_container_width=True, hide_index=True
                 )
 
-            # 3) 필수과목 충족 현황
-            st.subheader("📌 필수과목 충족 현황")
-            st.caption(f"필수과목: {', '.join(sorted(ESSENTIAL_DEPTS))}")
+            # 3) 인턴별 과목·분당·필수 충족 현황
+            st.subheader("📌 인턴별 과목 · 분당 · 필수과목 현황")
+            st.caption(
+                f"필수과목: {', '.join(sorted(ESSENTIAL_DEPTS))} / 분당 최소: {BUNDANG_MIN_TURNS}턴  \n"
+                "**휴가제외**: 휴가 배정 턴을 뺀 나머지 기준 / 각 과목 1턴 이상이면 ✅"
+            )
             status_rows = []
             for intern in mgr.df.index:
                 valid, missing = mgr.validate_intern(intern)
-                depts_in_sched = set()
-                for col in mgr.df.columns:
-                    val = mgr.df.loc[intern, col]
-                    if val and str(val) not in ('None', '', 'nan'):
-                        _, dept = mgr.parse_cell(val)
-                        if dept:
-                            depts_in_sched.add(dept)
+                dc      = mgr.get_dept_counts(intern)
+                dc_excl = mgr.get_dept_counts(intern, exclude_vacation=True)
+                bc      = mgr.count_bundang(intern)
+                b_ok    = bc >= BUNDANG_MIN_TURNS
+
+                # 휴가 제외 후 각 필수과 1턴 이상 체크
+                KEY_DEPTS = ['IM', 'GS', 'OB', 'PE']
+                excl_ok = all(dc_excl.get(d, 0) >= 1 for d in KEY_DEPTS)
+
+                # 휴가 턴 수
+                vac = mgr.get_intern_vacation(intern)
+                vac_cnt = sum(1 for p in ('1차', '2차') if vac[p])
+
+                # 필수과목별 보유 개수 문자열
+                _ess_label = {
+                    'IM': '내', 'GS': '외', 'OB': '산', 'PE': '소', '진로탐색': '진로'
+                }
+                _ess_parts = []
+                for _ed in sorted(ESSENTIAL_DEPTS):
+                    _ec = dc.get(_ed, 0)
+                    _el = _ess_label.get(_ed, _ed)
+                    _ess_parts.append(f"{_el}{_ec}")
+                _ess_summary = ' '.join(_ess_parts)   # 예) "내2 산1 소1 외1 진로1"
+
+                # 미달 과목 상세
+                _miss_parts = []
+                for _md in sorted(missing):
+                    _ml = _ess_label.get(_md, _md)
+                    _miss_parts.append(f"{_ml}({dc.get(_md, 0)})")
+                _miss_str = ', '.join(_miss_parts) if _miss_parts else ''
+
                 status_rows.append({
                     '이름': intern,
-                    '충족 여부': '✅ 충족' if valid else f'🚨 미달 ({len(missing)}개)',
-                    '미달 과목': ', '.join(sorted(missing)) if missing else '-',
-                    '보유 필수과목': ', '.join(sorted(ESSENTIAL_DEPTS & depts_in_sched)),
+                    '내': dc.get('IM', 0),
+                    '외': dc.get('GS', 0),
+                    '산': dc.get('OB', 0),
+                    '소': dc.get('PE', 0),
+                    '파견': dc.get('파견', 0),
+                    '분당': bc,
+                    '휴가': f"{vac_cnt}개",
+                    '내(-휴)': dc_excl.get('IM', 0),
+                    '외(-휴)': dc_excl.get('GS', 0),
+                    '산(-휴)': dc_excl.get('OB', 0),
+                    '소(-휴)': dc_excl.get('PE', 0),
+                    '각1↑': '✅' if excl_ok else '🚨',
+                    '분당충족': f'✅({bc})' if b_ok else f'🚨({bc}/{BUNDANG_MIN_TURNS})',
+                    '필수과목': f'✅ {_ess_summary}' if valid else f'🚨 {_ess_summary}',
+                    '미달과목': _miss_str if _miss_str else '-',
+                    '종합': '✅' if (valid and b_ok and excl_ok) else '🚨',
                 })
             status_df = pd.DataFrame(status_rows)
-            n_ok  = status_df['충족 여부'].str.startswith('✅').sum()
-            n_bad = len(status_df) - n_ok
-            c1, c2, c3 = st.columns(3)
-            c1.metric("전체 인원", len(status_df))
-            c2.metric("조건 충족", n_ok, delta=f"+{n_ok}")
-            c3.metric("조건 미달", n_bad, delta=f"-{n_bad}" if n_bad else "0")
+            n_all_ok   = sum(1 for r in status_rows if r['종합'] == '✅')
+            n_dept_bad = sum(1 for r in status_rows if '🚨' in str(r['필수과목']))
+            n_bund_bad = sum(1 for r in status_rows if '🚨' in str(r['분당충족']))
+            n_excl_bad = sum(1 for r in status_rows if r['각1↑'] == '🚨')
+            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+            mc1.metric("전체", len(status_df))
+            mc2.metric("✅ 모두 충족", n_all_ok)
+            mc3.metric("🚨 필수과목", n_dept_bad)
+            mc4.metric("🚨 분당", n_bund_bad)
+            mc5.metric("🚨 휴가제외 각1↑", n_excl_bad)
             st.dataframe(status_df, use_container_width=True, hide_index=True)
 
     # ── 관리자 탭2: 전체 스케줄 ────────────────────────────────────────────────
@@ -2003,18 +2357,36 @@ if user == 'ADMIN':
             st.warning("스케줄 데이터가 없습니다.")
         else:
             st.subheader("📋 전체 인턴 스케줄")
-            st.dataframe(mgr.df, use_container_width=True, height=600)
+            # 관리자 전체 스케줄에도 휴가 턴 음영
+            _adm_vac_cells = set()
+            for _anm in mgr.df.index:
+                _avtm = mgr.get_vacation_turns(_anm)
+                for _avt in _avtm:
+                    _adm_vac_cells.add((_anm, _avt))
+
+            def _adm_style_table(row):
+                return [
+                    "background-color:#e8d5f5;" if (row.name, c) in _adm_vac_cells else ""
+                    for c in row.index
+                ]
+            st.dataframe(
+                mgr.df.style.apply(_adm_style_table, axis=1),
+                use_container_width=True, height=600
+            )
+            st.caption("🟪 연보라 음영 = 휴가 턴")
 
             st.subheader("🔍 인턴별 상세")
             sel_intern = st.selectbox("인턴 선택", list(mgr.df.index), key="adm_intern_sel")
             if sel_intern:
                 row = mgr.df.loc[sel_intern]
+                _sel_vt = mgr.get_vacation_turns(sel_intern)
                 detail_rows = []
                 for col in mgr.df.columns:
                     val = row[col]
                     _, dept = mgr.parse_cell(val) if val and str(val) not in ('None','') else (None, None)
                     detail_rows.append({
                         '턴': col,
+                        '휴가': _sel_vt.get(col, ''),
                         '배치값': val or '-',
                         '과목': dept or '-',
                         '필수과목 여부': '⭐' if dept in ESSENTIAL_DEPTS else ''
@@ -2024,6 +2396,15 @@ if user == 'ADMIN':
                     st.success(f"✅ {sel_intern}: 필수과목 모두 충족")
                 else:
                     st.error(f"🚨 {sel_intern}: 미달 과목 → {', '.join(sorted(miss))}")
+                # 과목·파견 통계
+                _adc = mgr.get_dept_counts(sel_intern)
+                if _adc:
+                    _ac1, _ac2, _ac3, _ac4, _ac5 = st.columns(5)
+                    _ac1.metric("내(IM)", _adc.get('IM', 0))
+                    _ac2.metric("외(GS)", _adc.get('GS', 0))
+                    _ac3.metric("산(OB)", _adc.get('OB', 0))
+                    _ac4.metric("소(PE)", _adc.get('PE', 0))
+                    _ac5.metric("파견", _adc.get('파견', 0))
                 st.dataframe(pd.DataFrame(detail_rows), use_container_width=True, hide_index=True)
 
     # ── 관리자 탭3: 교환 이력 ─────────────────────────────────────────────────
@@ -2136,15 +2517,28 @@ if user == 'ADMIN':
                 vac = mgr.get_intern_vacation(intern)
                 v1  = vac['1차']
                 v2  = vac['2차']
-                # 분당 근무 수도 함께 표시
-                bc  = mgr.count_bundang(intern)
+                _vdc = mgr.get_dept_counts(intern)
+                _vdc_excl = mgr.get_dept_counts(intern, exclude_vacation=True)
+                # 휴가 턴에 해당하는 과목 개수 = 전체 - 휴가제외
+                def _vac_fmt(dept):
+                    total = _vdc.get(dept, 0)
+                    excl  = _vdc_excl.get(dept, 0)
+                    vac_c = total - excl
+                    return f"{total}({vac_c})" if vac_c > 0 else str(total)
                 vac_rows.append({
                     '이름':      intern,
+                    '내': _vac_fmt('IM'),
+                    '외': _vac_fmt('GS'),
+                    '산': _vac_fmt('OB'),
+                    '소': _vac_fmt('PE'),
+                    '내(-휴)': _vdc_excl.get('IM', 0),
+                    '외(-휴)': _vdc_excl.get('GS', 0),
+                    '산(-휴)': _vdc_excl.get('OB', 0),
+                    '소(-휴)': _vdc_excl.get('PE', 0),
                     '1차 턴':    v1['turn'] if v1 else '미배정',
                     '1차 타입':  v1['type'] if v1 else '-',
                     '2차 턴':    v2['turn'] if v2 else '미배정',
                     '2차 타입':  v2['type'] if v2 else '-',
-                    '분당 근무': f"{bc}개 {'✅' if bc >= BUNDANG_MIN_TURNS else '🚨'}",
                 })
             vac_df = pd.DataFrame(vac_rows)
             st.dataframe(vac_df, use_container_width=True, hide_index=True)
@@ -2236,19 +2630,53 @@ if user == 'ADMIN':
                 for r in preview['results']:
                     p1 = r['periods'].get('1차', {})
                     p2 = r['periods'].get('2차', {})
+                    p1_alts = p1.get('alternatives', [])
+                    p2_alts = p2.get('alternatives', [])
                     prev_rows.append({
                         '이름': r['name'],
                         '1차 턴': p1.get('turn') or '-',
                         '1차 과목': p1.get('dept') or '-',
                         '1차 타입': p1.get('vac_type') or '-',
                         '1차': '✅' if p1.get('status') == 'ok' else '❌',
+                        '1차 대안': (', '.join(f"{t}({d})" for t, d in p1_alts
+                                     if t != p1.get('turn'))
+                                    if len(p1_alts) > 1 else '-'),
                         '2차 턴': p2.get('turn') or '-',
                         '2차 과목': p2.get('dept') or '-',
                         '2차 타입': p2.get('vac_type') or '-',
                         '2차': '✅' if p2.get('status') == 'ok' else '❌',
+                        '2차 대안': (', '.join(f"{t}({d})" for t, d in p2_alts
+                                     if t != p2.get('turn'))
+                                    if len(p2_alts) > 1 else '-'),
                     })
                 st.dataframe(pd.DataFrame(prev_rows),
                              use_container_width=True, hide_index=True)
+
+                # 대안이 있는 인턴 상세
+                has_alts = [r for r in preview['results']
+                            if any(len(r['periods'].get(p, {}).get('alternatives', [])) > 1
+                                   for p in ('1차', '2차'))]
+                if has_alts:
+                    with st.expander(f"🔀 대안 턴이 있는 인턴 ({len(has_alts)}명)", expanded=False):
+                        st.caption("아래 인턴은 다른 턴에도 배정 가능합니다. "
+                                   "개별 수정은 '✏️ 휴가 배정 / 수정'에서 할 수 있습니다.")
+                        for entry in has_alts:
+                            nm = entry['name']
+                            alt_lines = []
+                            for period in ('1차', '2차'):
+                                pd_ = entry['periods'].get(period, {})
+                                alts = pd_.get('alternatives', [])
+                                if len(alts) > 1:
+                                    chosen = pd_.get('turn')
+                                    others = [f"{t}({d})" for t, d in alts if t != chosen]
+                                    alt_lines.append(
+                                        f"  {period}: 선택됨 **{chosen}**"
+                                        f"({pd_.get('dept')}) / 대안: {', '.join(others)}"
+                                    )
+                            if alt_lines:
+                                st.markdown(f"**{nm}**")
+                                for line in alt_lines:
+                                    st.caption(line)
 
                 # 실패 상세 + 해결 방안
                 failed = [r for r in preview['results']
@@ -2386,31 +2814,6 @@ if user == 'ADMIN':
 
             st.divider()
 
-            # ── 필수과목 + 분당 근무 통합 현황 ──────────────────────────────────
-            st.subheader("🏥 필수과목 · 분당 근무 충족 현황")
-            compliance_rows = []
-            for intern in all_interns:
-                v_ok, missing = mgr.validate_intern(intern)
-                bc = mgr.count_bundang(intern)
-                b_ok = bc >= BUNDANG_MIN_TURNS
-                compliance_rows.append({
-                    '이름': intern,
-                    '필수과목': '✅ 충족' if v_ok else '🚨 미충족',
-                    '누락 과목': ', '.join(sorted(missing)) if missing else '-',
-                    '분당 턴': f"{bc}개",
-                    '분당 충족': f"✅ ({bc}/{BUNDANG_MIN_TURNS})" if b_ok
-                               else f"🚨 부족 ({bc}/{BUNDANG_MIN_TURNS})",
-                    '종합': '✅' if (v_ok and b_ok) else '🚨',
-                })
-            st.dataframe(pd.DataFrame(compliance_rows),
-                         use_container_width=True, hide_index=True)
-            # 요약
-            all_ok = sum(1 for r in compliance_rows if r['종합'] == '✅')
-            st.caption(f"전체 {len(compliance_rows)}명 중 **{all_ok}명** 모든 조건 충족 / "
-                       f"**{len(compliance_rows) - all_ok}명** 미충족")
-
-            st.divider()
-
             # ── 구글 시트 휴가반영 동기화 ──────────────────────────────────────
             st.subheader("📤 구글 시트 업데이트")
             st.caption(
@@ -2461,7 +2864,38 @@ if st.session_state.get('force_pw_change'):
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
 
-    # ── 이름 + 필수과목 현황 (compact) ────────────────────────────────────────
+    # ── 빠른 요청 확인 (인라인) ─────────────────────────────────────────────
+    if st.session_state.quick_confirm is not None:
+        qc = st.session_state.quick_confirm
+        st.markdown("### ⚡ 교환 요청 확인")
+        _qc_tlbl = mgr.turn_label(user, qc['turn'])
+        st.info(
+            f"**{_qc_tlbl}** 턴\n\n"
+            f"나: `{qc['my_val']}` ↔ **{qc['receiver']}**: `{qc['partner_val']}`"
+        )
+        qc_message = st.text_input(
+            "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
+            key="qc_inline_msg", max_chars=100
+        )
+        qc_c1, qc_c2 = st.columns(2)
+        if qc_c1.button("✅ 요청 보내기", key="qc_inline_yes",
+                        type="primary", use_container_width=True):
+            with st.spinner("최신 데이터 확인 중..."):
+                mgr.load_db()
+            succ, result_msg = mgr.add_request(
+                user, qc['receiver'], qc['turn'], message=qc_message)
+            st.session_state.quick_confirm = None
+            if succ:
+                st.success(result_msg)
+            else:
+                st.error(result_msg)
+            st.rerun()
+        if qc_c2.button("❌ 취소", key="qc_inline_no", use_container_width=True):
+            st.session_state.quick_confirm = None
+            st.rerun()
+        st.divider()
+
+    # ── 이름 + 필수과목 현황 + 과목 통계 (compact) ───────────────────────────
     valid_sb, missing_sb = mgr.validate_intern(user)
     dept_badge = "✅ 충족" if valid_sb else f"🚨 {len(missing_sb)}개 미달"
     st.markdown(f"### 👤 {user}")
@@ -2469,6 +2903,17 @@ with st.sidebar:
         st.caption("✅ 필수과목 모두 충족")
     else:
         st.error(f"🚨 미달: {', '.join(sorted(missing_sb))}")
+
+    # 개인별 과목·파견 통계
+    _dc = mgr.get_dept_counts(user)
+    if _dc:
+        _stats_parts = []
+        for _key in ['IM', 'GS', 'OB', 'PE']:
+            _label = {'IM': '내', 'GS': '외', 'OB': '산', 'PE': '소'}.get(_key, _key)
+            _cnt = _dc.get(_key, 0)
+            _stats_parts.append(f"**{_label}**{_cnt}")
+        _stats_parts.append(f"**파견**{_dc.get('파견', 0)}")
+        st.caption(' · '.join(_stats_parts))
 
     # ── 비밀번호 변경 (compact) ────────────────────────────────────────────────
     with st.expander("🔑 비밀번호 변경"):
@@ -2524,7 +2969,8 @@ with st.sidebar:
                 for req in inbox_normal:
                     snd_v = mgr.df.loc[req['sender'], req['turn']] if req['sender'] in mgr.df.index else '?'
                     my_v  = mgr.df.loc[user, req['turn']]          if user          in mgr.df.index else '?'
-                    st.write(f"**{req['sender']}** | {req['turn']}")
+                    _req_tlbl = mgr.turn_label(user, req['turn'])
+                    st.write(f"**{req['sender']}** | {_req_tlbl}")
                     st.caption(f"상대: `{snd_v}` ↔ 나: `{my_v}`  _{req['timestamp'][:10]}_")
                     if req.get('message'):
                         st.info(f"💬 {req['message']}")
@@ -2555,7 +3001,8 @@ with st.sidebar:
                     for req in reqs:
                         snd_v = mgr.df.loc[req['sender'], req['turn']] if req['sender'] in mgr.df.index else '?'
                         my_v  = mgr.df.loc[user, req['turn']]          if user          in mgr.df.index else '?'
-                        st.write(f"  • **{req['turn']}**: `{snd_v}` ↔ 나: `{my_v}`")
+                        _ch_tlbl = mgr.turn_label(user, req['turn'])
+                        st.write(f"  • **{_ch_tlbl}**: `{snd_v}` ↔ 나: `{my_v}`")
                     ca, cb = st.columns(2)
                     # 체인은 내게 해당하는 건만 일괄 수락/거절
                     my_chain_reqs = [r for r in reqs if r['status'] == 'pending']
@@ -2652,15 +3099,23 @@ with st.sidebar:
         label_visibility="collapsed"
     )
 
+    # 사용자 휴가 턴 정보 (시뮬레이션 전역)
+    _user_vac_turns = mgr.get_vacation_turns(user) if user else {}
+
     if sim_mode == "🔄 특정 턴 교환":
         st.caption("특정 턴을 교환했을 때 가능한 파트너를 탐색합니다.")
         if not mgr.df.empty:
             sim_turns_avail = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
-            sim_turn = st.selectbox("턴 선택", sim_turns_avail, key="sim_turn_sel")
+            sim_turns_labels = [mgr.turn_label(user, t) for t in sim_turns_avail]
+            sim_sel_idx = st.selectbox("턴 선택", range(len(sim_turns_avail)),
+                                       format_func=lambda i: sim_turns_labels[i],
+                                       key="sim_turn_sel")
+            sim_turn = sim_turns_avail[sim_sel_idx]
             if user in mgr.df.index and sim_turn in mgr.df.columns:
                 sim_my_val = mgr.df.loc[user, sim_turn]
                 const_sb   = mgr.get_exchange_constraints(user, sim_turn)
-                st.metric(f"내 {sim_turn}", sim_my_val or "(없음)")
+                _t_lbl = mgr.turn_label(user, sim_turn)
+                st.metric(f"내 {_t_lbl}", sim_my_val or "(없음)")
                 if const_sb:
                     if const_sb['is_free']:
                         st.success("✅ 제약 없음")
@@ -2727,7 +3182,8 @@ with st.sidebar:
                     for r in disp_s2:
                         icon_r = "✅" if r['valid'] else "❌"
                         col_a, col_b = st.columns([3, 1])
-                        col_a.write(f"{icon_r} **{r['partner']}**  {r['turn']}{'  ⏳' if r['has_pending'] else ''}")
+                        _tlbl2 = mgr.turn_label(user, r['turn'])
+                        col_a.write(f"{icon_r} **{r['partner']}**  {_tlbl2}{'  ⏳' if r['has_pending'] else ''}")
                         col_a.caption(f"나: `{r['my_val']}` → 받을 턴: `{r['partner_val']}`")
                         if r['reasons']:
                             col_a.caption(f"⚠️ {' / '.join(r['reasons'])}")
@@ -2742,37 +3198,57 @@ with st.sidebar:
                             col_b.caption("⏳")
 
     else:  # 🔗 복합 교환 탐색
-        st.caption("2~3개 턴을 동시에 교환하는 조합을 탐색합니다.")
-        st.info("💡 **일괄 요청**: 모든 상대방이 수락해야만 교환이 실행됩니다.")
+        st.caption("단독 교환이 안 되는 경우, 여러 턴을 동시에 교환하는 조합을 찾습니다.")
+        st.info("💡 모든 상대방이 수락해야만 교환이 일괄 실행됩니다.")
 
         if 'chain_results' not in st.session_state:
             st.session_state.chain_results = None
 
+        # ── 조건 입력 ──
+        st.markdown("**① 얻고 싶은 과목/턴 선택**")
         all_sv_chain = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
             if v and str(v).strip() not in ('None', '', '예비턴')
         )) if not mgr.df.empty else []
-        want_depts_chain = st.multiselect("받고 싶은 과목/턴 (복수 선택 가능)", all_sv_chain, key="chain_dept_sel")
+        want_depts_chain = st.multiselect(
+            "받고 싶은 값", all_sv_chain,
+            key="chain_dept_sel",
+            help="이 값을 가진 상대를 찾습니다"
+        )
 
-        max_sw = st.radio("최대 교환 수", [2, 3], index=0, horizontal=True, key="sim_max_sw")
+        st.markdown("**② 교환 가능한 턴 선택**")
+        avail_t_chain = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
+        chain_turns = st.multiselect(
+            "내가 내줄 수 있는 턴", avail_t_chain,
+            key="chain_turn_sel",
+            help="비우면 모든 턴 대상으로 탐색"
+        )
 
-        if st.button("🔍 복합 탐색", type="primary", key="btn_chain_search"):
+        st.markdown("**③ 옵션**")
+        max_sw = st.radio("최대 동시 교환", [2, 3], index=0, horizontal=True, key="sim_max_sw")
+
+        if st.button("🔍 복합 탐색 시작", type="primary", key="btn_chain_search",
+                     use_container_width=True):
             if not want_depts_chain:
-                st.warning("과목/턴을 하나 이상 선택하세요.")
+                st.warning("얻고 싶은 과목/턴을 하나 이상 선택하세요.")
             else:
-                with st.spinner("복합 교환 탐색 중... (잠시 기다려주세요)"):
-                    all_chain = mgr.simulate_multi_swap(user, only_need_multi=True, max_swaps=max_sw)
-                # 선택한 과목 중 하나라도 받는 조합 필터
-                filtered = [c for c in all_chain
-                            if any(s['partner_val'] in want_depts_chain for s in c['swaps'])]
-                st.session_state.chain_results = filtered
+                with st.spinner("복합 교환 탐색 중..."):
+                    chain_res_new = mgr.simulate_multi_swap(
+                        user,
+                        only_need_multi=True,
+                        max_swaps=max_sw,
+                        target_vals=want_depts_chain,
+                        allowed_turns=chain_turns if chain_turns else None,
+                    )
+                st.session_state.chain_results = chain_res_new
 
+        # ── 결과 표시 ──
         chain_res = st.session_state.chain_results
         if chain_res is not None:
+            st.divider()
             if not chain_res:
-                label = ', '.join(f'**{v}**' for v in (want_depts_chain or []))
-                st.info(f"{label} 을(를) 받을 수 있는 복합 교환 조합이 없습니다.")
+                st.info("조건에 맞는 복합 교환 조합이 없습니다.")
             else:
                 st.caption(f"가능한 복합 교환 조합: **{len(chain_res)}개**")
                 for idx, combo in enumerate(chain_res):
@@ -2810,34 +3286,8 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 st.title("🏥 차병원 인턴 턴표 교환소")
 
-# ── 빠른 요청 컨펌 팝업 다이얼로그 ──────────────────────────────────────────
-@st.dialog("⚡ 교환 요청 확인")
-def quick_confirm_dialog():
-    qc = st.session_state.quick_confirm
-    st.info(
-        f"**{qc['turn']}** 턴  |  "
-        f"나: `{qc['my_val']}` ↔ **{qc['receiver']}**: `{qc['partner_val']}`"
-    )
-    qc_message = st.text_input(
-        "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등", max_chars=100
-    )
-    col_yes, col_no = st.columns(2)
-    if col_yes.button("✅ 요청 보내기", type="primary", use_container_width=True):
-        with st.spinner("최신 데이터 확인 중..."):
-            mgr.load_db()
-        succ, msg = mgr.add_request(user, qc['receiver'], qc['turn'], message=qc_message)
-        st.session_state.quick_confirm = None
-        if succ:
-            st.success(msg)
-        else:
-            st.error(msg)
-        st.rerun()
-    if col_no.button("❌ 취소", use_container_width=True):
-        st.session_state.quick_confirm = None
-        st.rerun()
 
-if st.session_state.quick_confirm is not None:
-    quick_confirm_dialog()
+
 
 # ── 복합 교환 요청 컨펌 팝업 다이얼로그 ─────────────────────────────────────
 @st.dialog("📤 복합 교환 요청 확인")
@@ -2910,8 +3360,21 @@ for i, item in enumerate(st.session_state.exchange_items):
         sel_t = st.selectbox(lbl, others,
                              index=others.index(t_default), key=f'ei_t_{iid}')
     with c2:
-        sel_turn = st.selectbox("턴", avail_turns,
-                                index=avail_turns.index(turn_default), key=f'ei_turn_{iid}')
+        # 턴 선택 시 휴가 표시
+        _u_vt = mgr.get_vacation_turns(user)
+        _t_vt = mgr.get_vacation_turns(sel_t) if sel_t else {}
+        _turn_labels_ei = []
+        for _t in avail_turns:
+            _marks = []
+            if _t in _u_vt: _marks.append(f"나{_u_vt[_t]}")
+            if _t in _t_vt: _marks.append(f"{sel_t}{_t_vt[_t]}")
+            _turn_labels_ei.append(f"{_t} {'  '.join(_marks)}" if _marks else _t)
+        sel_turn_idx = avail_turns.index(turn_default)
+        _sel_turn_idx = st.selectbox("턴", range(len(avail_turns)),
+                                     index=sel_turn_idx,
+                                     format_func=lambda idx, _lb=_turn_labels_ei: _lb[idx],
+                                     key=f'ei_turn_{iid}')
+        sel_turn = avail_turns[_sel_turn_idx]
     st.session_state.exchange_items[i]['target'] = sel_t
     st.session_state.exchange_items[i]['turn']   = sel_turn
     my_v = mgr.df.loc[user,   sel_turn] if user   in mgr.df.index else '?'
@@ -3001,21 +3464,13 @@ if st.session_state.exchange_items:
                     lines        = []
                     sender_swaps = []   # 내가 직접 신청하는 교환만
                     for s in all_swaps:
-                        if s.get('is_partner_comp'):
-                            # 상대방이 제3자와 하는 보완 교환
-                            owner = s['comp_owner']
-                            lines.append(
-                                f"🔄 **보완** **{s['turn']}** &nbsp;"
-                                f"**{owner}**: `{s['my_val']}` ↔ **{s['partner']}**: `{s['partner_val']}`"
-                                f"  _({owner}↔{s['partner']} 별도 합의 필요)_"
-                            )
-                        else:
-                            tag = "➕ 추가" if s.get('is_additional') else "✓ 선택됨"
-                            lines.append(
-                                f"**{tag}** **{s['turn']}** &nbsp;"
-                                f"나: `{s['my_val']}` ↔ **{s['partner']}**: `{s['partner_val']}`"
-                            )
-                            sender_swaps.append(s)
+                        _stlbl = mgr.turn_label(user, s['turn'])
+                        tag = "➕ 추가" if s.get('is_additional') else "✓ 선택됨"
+                        lines.append(
+                            f"**{tag}** **{_stlbl}** &nbsp;"
+                            f"나: `{s['my_val']}` ↔ **{s['partner']}**: `{s['partner_val']}`"
+                        )
+                        sender_swaps.append(s)
                     cc1, cc2 = st.columns([5, 1])
                     cc1.write("  \n".join(lines))
                     if sender_swaps and cc2.button("⬆️ 설정", key=f"cset_{global_idx}",
@@ -3068,6 +3523,13 @@ highlight_pairs = ({(user, it['turn']) for it in st.session_state.exchange_items
 remain     = [x for x in mgr.df.index if x != user and x not in sel_targets]
 display_df = mgr.df.reindex([user] + sel_targets + remain)
 
+# 전체 인원의 휴가 턴 쌍 집합 {(name, turn)} — 음영 표시용
+_vac_cells = set()
+for _nm in display_df.index:
+    _vtm = mgr.get_vacation_turns(_nm)
+    for _vt in _vtm:
+        _vac_cells.add((_nm, _vt))
+
 def style_table(row):
     styles = []
     for col in row.index:
@@ -3078,6 +3540,9 @@ def style_table(row):
             s += "background-color:#e3f2fd;"
         if (row.name, col) in highlight_pairs:
             s += "border:3px solid #e53935;background-color:#ffcdd2;"
+        elif (row.name, col) in _vac_cells:
+            # 휴가 턴 음영 (연보라색)
+            s += "background-color:#e8d5f5;"
         styles.append(s)
     return styles
 
@@ -3085,6 +3550,7 @@ st.dataframe(
     display_df.style.apply(style_table, axis=1),
     use_container_width=True, height=500
 )
+st.caption("🟪 연보라 음영 = 휴가 턴")
 
 st.markdown("---")
 
@@ -3117,14 +3583,14 @@ with tab_browse:
             valid_cnt = sum(1 for c in compatibilities if c['valid'])
             has_valid = valid_cnt > 0
             if give_turn == '아무턴':
-                turn_label = '아무 턴'
+                turn_label_mkt = '아무 턴'
             elif give_turn:
-                turn_label = give_turn
+                turn_label_mkt = mgr.turn_label(poster, give_turn)
             else:
-                turn_label = '무관'
+                turn_label_mkt = '무관'
             with st.expander(
                 f"{'🟢' if has_valid else '🔴'} **{poster}** | "
-                f"줄 것: {turn_label}{(' `'+give_val+'`') if give_val else ''} | "
+                f"줄 것: {turn_label_mkt}{(' `'+give_val+'`') if give_val else ''} | "
                 f"원하는 과목: {want_str or '무관'} | "
                 f"{'✅ '+str(valid_cnt)+'개 조합' if has_valid else '❌ 단독 불가 (복합 탐색 가능)'}",
                 expanded=has_valid
@@ -3146,7 +3612,8 @@ with tab_browse:
                         col_i, col_b = st.columns([5, 1])
                         with col_i:
                             icon = '✅' if is_valid else '❌'
-                            st.write(f"{icon} **{t}** — {poster}: `{p_val}` ↔ 나: `{v_val}`")
+                            _mkt_tlbl = mgr.turn_label(user, t)
+                            st.write(f"{icon} **{_mkt_tlbl}** — {poster}: `{p_val}` ↔ 나: `{v_val}`")
                             if reasons:
                                 st.caption(f"⚠️ {' / '.join(reasons)}")
                         with col_b:
