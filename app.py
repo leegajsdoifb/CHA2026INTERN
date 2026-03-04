@@ -1310,7 +1310,7 @@ class DataManager:
             return None, None, (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
                                 f"{dept_label} 배치 턴이 없습니다.")
 
-        # 내/외/산/소 2개 이상 규칙: 휴가 제외 후 최소 1턴 남아야 함
+        # 내/외/산/소 2개 이상 규칙: 해당 과 전체(모든 지역) 2개↑ 있어야 휴가 가능
         ESSENTIAL_VACATION_DEPTS = ('IM', 'GS', 'OB', 'PE')
         valid_candidates = []
         for t, dept in candidates:
@@ -1319,7 +1319,6 @@ class DataManager:
                     1 for col in self.df.columns
                     if (lambda v: (
                         self.parse_cell(v)[1] == dept
-                        and (self.parse_cell(v)[0] or DEFAULT_LOCATION) == DEFAULT_LOCATION
                     ) if v and str(v) not in ('None','') else False)(
                         self.df.loc[name, col])
                 )
@@ -1329,7 +1328,7 @@ class DataManager:
 
         if not valid_candidates:
             return None, None, (f"{name}의 {period} 기간에 휴가 가능한 턴이 없습니다 "
-                                f"(내/외/산/소는 최소 2개 필요).")
+                                f"(내/외/산/소는 전체 최소 2개 필요).")
 
         turn, dept = valid_candidates[0]
         return turn, dept, None
@@ -1386,7 +1385,7 @@ class DataManager:
             return [], (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
                         f"{dept_label} 배치 턴이 없습니다.")
 
-        # 내/외/산/소 2개 이상 규칙: 휴가 제외 후 최소 1턴 남아야 함
+        # 내/외/산/소 2개 이상 규칙: 해당 과 전체(모든 지역) 2개↑ 있어야 휴가 가능
         ESSENTIAL_VACATION_DEPTS = ('IM', 'GS', 'OB', 'PE')
         valid_candidates = []
         for t, dept in candidates:
@@ -1395,7 +1394,6 @@ class DataManager:
                     1 for col in self.df.columns
                     if (lambda v: (
                         self.parse_cell(v)[1] == dept
-                        and (self.parse_cell(v)[0] or DEFAULT_LOCATION) == DEFAULT_LOCATION
                     ) if v and str(v) not in ('None','') else False)(
                         self.df.loc[name, col])
                 )
@@ -1405,7 +1403,7 @@ class DataManager:
 
         if not valid_candidates:
             return [], (f"{name}의 {period} 기간에 휴가 가능한 턴이 없습니다 "
-                        f"(내/외/산/소는 최소 2개 필요).")
+                        f"(내/외/산/소는 전체 최소 2개 필요).")
 
         return valid_candidates, None
 
@@ -1541,6 +1539,12 @@ class DataManager:
             return (f"{period} 기간의 모든 턴이 진로탐색입니다. "
                     "턴 교환을 통해 해당 기간에 다른 과목을 확보해야 합니다.")
         if error_msg and '최소 2개 필요' in error_msg:
+            if group == 'C':
+                # C그룹: 후보에 있던 내/외/산/소가 각 1개뿐이라 실패
+                dept_1 = [f"{d}" for _, d, l in avail if d in ('GS','OB','PE','IM')]
+                return (f"내/외/산/소 과목이 각 1개뿐이라 휴가로 사용 불가합니다. "
+                        f"보유: {', '.join(set(dept_1)) or '-'}. "
+                        f"턴 교환으로 해당 과 배치를 늘리거나 수동 배정을 고려하세요.")
             td = 'IM' if group == 'A' else 'EMC'
             return (f"{td} 배치가 1개뿐이라 휴가로 사용 불가합니다. "
                     f"C그룹(기타 분당/파견)으로 배정하거나, "
