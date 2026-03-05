@@ -1503,23 +1503,21 @@ class DataManager:
                 turn_load[best_turn] = turn_load.get(best_turn, 0) + 1
                 slot_map.setdefault((best_turn, prefix), []).append((name, best_dept))
 
-            # ── 3단계: 주차 배정 — 전역 주차 부하 균등 + 랜덤 ───────
-            all_to_assign = []
+            # ── 3단계: 주차 배정 — 턴 위치 기반 번호 결정 ───────
+            period_turns_ordered = sorted(
+                VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
+                key=lambda x: int(x.replace('턴', ''))
+            )
+            turn_to_week = {t: i + 1 for i, t in enumerate(period_turns_ordered)}
             for (turn, prefix), interns in slot_map.items():
+                week = turn_to_week.get(turn, 1)
+                vac_type = f"{prefix}{week}"
                 for name, dept in interns:
-                    all_to_assign.append((turn, prefix, name, dept))
-            random.shuffle(all_to_assign)
-            for turn, prefix, name, dept in all_to_assign:
-                min_wl = min(week_load.values())
-                min_weeks = [w for w in range(1, 5) if week_load[w] == min_wl]
-                best_week = random.choice(min_weeks)
-                vac_type = f"{prefix}{best_week}"
-                week_load[best_week] += 1
-                ok, msg = self.set_intern_vacation(name, period, vac_type)
-                if ok:
-                    results[name]['success'].append(msg)
-                else:
-                    results[name]['errors'].append(msg)
+                    ok, msg = self.set_intern_vacation(name, period, vac_type)
+                    if ok:
+                        results[name]['success'].append(msg)
+                    else:
+                        results[name]['errors'].append(msg)
 
         return list(results.values())
 
@@ -1646,21 +1644,19 @@ class DataManager:
                     'alternatives': [(t, d) for t, d in alternatives],
                 }
 
-            # ── 3단계: 주차 배정 — 전역 주차 부하 균등 + 랜덤 ───
-            all_to_assign = []
+            # ── 3단계: 주차 배정 — 턴 위치 기반 번호 결정 ───
+            period_turns_ordered = sorted(
+                VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
+                key=lambda x: int(x.replace('턴', ''))
+            )
+            turn_to_week = {t: i + 1 for i, t in enumerate(period_turns_ordered)}
             for (turn, prefix), interns in slot_map.items():
+                week = turn_to_week.get(turn, 1)
+                vac_type = f"{prefix}{week}"
                 for name, dept in interns:
-                    all_to_assign.append((turn, prefix, name, dept))
-            random.shuffle(all_to_assign)
-            for turn, prefix, name, dept in all_to_assign:
-                min_wl = min(week_load.values())
-                min_weeks = [w for w in range(1, 5) if week_load[w] == min_wl]
-                best_week = random.choice(min_weeks)
-                vac_type = f"{prefix}{best_week}"
-                week_load[best_week] += 1
-                a = intern_asgn[name][period]
-                a['vac_type'] = vac_type
-                a['week'] = best_week
+                    a = intern_asgn[name][period]
+                    a['vac_type'] = vac_type
+                    a['week'] = week
 
         # ── 결과 정리 ─────────────────────────────────────────────
         results = []
@@ -2558,61 +2554,6 @@ if user == 'ADMIN':
             vac_df = pd.DataFrame(vac_rows)
             st.dataframe(vac_df, use_container_width=True, hide_index=True)
 
-            # ── 휴가 배정 통계 ──────────────────────────────────────────────
-            st.markdown("##### 📊 휴가 배정 통계")
-            # 턴별 / 그룹별 인원 집계
-            turn_stats = {}   # {(period, turn): count}
-            group_stats = {}  # {(period, group): count}
-            assigned_cnt = 0
-            unassigned_cnt = 0
-
-            for intern in all_interns:
-                vac = mgr.get_intern_vacation(intern)
-                for period in ('1차', '2차'):
-                    v = vac[period]
-                    if v and v.get('turn') and v.get('type'):
-                        assigned_cnt += 1
-                        t_key = (period, v['turn'])
-                        turn_stats[t_key] = turn_stats.get(t_key, 0) + 1
-                        grp = mgr.get_vacation_group(v['type'])
-                        g_key = (period, grp)
-                        group_stats[g_key] = group_stats.get(g_key, 0) + 1
-                    else:
-                        unassigned_cnt += 1
-
-            sc1, sc2 = st.columns(2)
-            _tbl_height = 320
-            with sc1:
-                # 턴별 인원 표
-                _ns = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
-                t_rows = []
-                for period in ('1차', '2차'):
-                    period_turns = _ns(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
-                    for t in period_turns:
-                        cnt = turn_stats.get((period, t), 0)
-                        t_rows.append({'기간': period, '턴': t, '인원': cnt})
-                if t_rows:
-                    st.markdown("**턴별 휴가 인원**")
-                    st.dataframe(pd.DataFrame(t_rows), use_container_width=True,
-                                 hide_index=True, height=_tbl_height)
-
-            with sc2:
-                # 그룹별 인원 표
-                g_labels = {'A': 'A (IM)', 'B': 'B (EMC)', 'C': 'C (기타/파견)'}
-                g_rows = []
-                for period in ('1차', '2차'):
-                    for grp in ('A', 'B', 'C'):
-                        cnt = group_stats.get((period, grp), 0)
-                        g_rows.append({'기간': period, '그룹': g_labels[grp], '인원': cnt})
-                if g_rows:
-                    st.markdown("**그룹별 휴가 인원**")
-                    st.dataframe(pd.DataFrame(g_rows), use_container_width=True,
-                                 hide_index=True, height=_tbl_height)
-
-            st.caption(f"배정 완료: {assigned_cnt}건 / 미배정: {unassigned_cnt}건")
-
-            st.divider()
-
             # ── 전체 자동 배정 (미리보기 → 확정) ──────────────────────────────
             st.subheader("🤖 전체 자동 배정")
             st.caption(
@@ -2775,6 +2716,61 @@ if user == 'ADMIN':
                                  key="adm_cancel_preview"):
                         st.session_state.vacation_preview = None
                         st.rerun()
+
+            st.divider()
+
+            # ── 휴가 배정 통계 ──────────────────────────────────────────────
+            st.markdown("##### 📊 휴가 배정 통계")
+            # 턴별 / 그룹별 인원 집계
+            turn_stats = {}   # {(period, turn): count}
+            group_stats = {}  # {(period, group): count}
+            assigned_cnt = 0
+            unassigned_cnt = 0
+
+            for intern in all_interns:
+                vac = mgr.get_intern_vacation(intern)
+                for period in ('1차', '2차'):
+                    v = vac[period]
+                    if v and v.get('turn') and v.get('type'):
+                        assigned_cnt += 1
+                        t_key = (period, v['turn'])
+                        turn_stats[t_key] = turn_stats.get(t_key, 0) + 1
+                        grp = mgr.get_vacation_group(v['type'])
+                        g_key = (period, grp)
+                        group_stats[g_key] = group_stats.get(g_key, 0) + 1
+                    else:
+                        unassigned_cnt += 1
+
+            sc1, sc2 = st.columns(2)
+            _tbl_height = 320
+            with sc1:
+                # 턴별 인원 표
+                _ns = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
+                t_rows = []
+                for period in ('1차', '2차'):
+                    period_turns = _ns(VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2)
+                    for t in period_turns:
+                        cnt = turn_stats.get((period, t), 0)
+                        t_rows.append({'기간': period, '턴': t, '인원': cnt})
+                if t_rows:
+                    st.markdown("**턴별 휴가 인원**")
+                    st.dataframe(pd.DataFrame(t_rows), use_container_width=True,
+                                 hide_index=True, height=_tbl_height)
+
+            with sc2:
+                # 그룹별 인원 표
+                g_labels = {'A': 'A (IM)', 'B': 'B (EMC)', 'C': 'C (기타/파견)'}
+                g_rows = []
+                for period in ('1차', '2차'):
+                    for grp in ('A', 'B', 'C'):
+                        cnt = group_stats.get((period, grp), 0)
+                        g_rows.append({'기간': period, '그룹': g_labels[grp], '인원': cnt})
+                if g_rows:
+                    st.markdown("**그룹별 휴가 인원**")
+                    st.dataframe(pd.DataFrame(g_rows), use_container_width=True,
+                                 hide_index=True, height=_tbl_height)
+
+            st.caption(f"배정 완료: {assigned_cnt}건 / 미배정: {unassigned_cnt}건")
 
             st.divider()
 
