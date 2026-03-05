@@ -1291,9 +1291,11 @@ class DataManager:
             if dept == 'EMC' and loc == '소아':
                 continue
 
-            # 관리자 금지 과목 필터
-            if blocked_depts and dept in blocked_depts:
-                continue
+            # 관리자 금지 과목(지역) 필터
+            if blocked_depts:
+                _blk_label = f"{dept}({loc})" if loc != DEFAULT_LOCATION else dept
+                if _blk_label in blocked_depts:
+                    continue
 
             if vac_group in ('A', 'B'):
                 # A=IM(분당), B=EMC(분당) — 파견 제외
@@ -1371,9 +1373,11 @@ class DataManager:
             if dept == 'EMC' and loc == '소아':
                 continue
 
-            # 관리자 금지 과목 필터
-            if blocked_depts and dept in blocked_depts:
-                continue
+            # 관리자 금지 과목(지역) 필터
+            if blocked_depts:
+                _blk_label = f"{dept}({loc})" if loc != DEFAULT_LOCATION else dept
+                if _blk_label in blocked_depts:
+                    continue
 
             if vac_group in ('A', 'B'):
                 # A=IM(분당), B=EMC(분당) — 파견 제외
@@ -2577,8 +2581,8 @@ if user == 'ADMIN':
                         unassigned_cnt += 1
 
             sc1, sc2 = st.columns(2)
+            _tbl_height = 320
             with sc1:
-                st.caption(f"배정 완료: {assigned_cnt}건 / 미배정: {unassigned_cnt}건")
                 # 턴별 인원 표
                 _ns = lambda turns: sorted(turns, key=lambda x: int(x.replace('턴', '')))
                 t_rows = []
@@ -2590,7 +2594,7 @@ if user == 'ADMIN':
                 if t_rows:
                     st.markdown("**턴별 휴가 인원**")
                     st.dataframe(pd.DataFrame(t_rows), use_container_width=True,
-                                 hide_index=True, height=320)
+                                 hide_index=True, height=_tbl_height)
 
             with sc2:
                 # 그룹별 인원 표
@@ -2603,7 +2607,9 @@ if user == 'ADMIN':
                 if g_rows:
                     st.markdown("**그룹별 휴가 인원**")
                     st.dataframe(pd.DataFrame(g_rows), use_container_width=True,
-                                 hide_index=True, height=250)
+                                 hide_index=True, height=_tbl_height)
+
+            st.caption(f"배정 완료: {assigned_cnt}건 / 미배정: {unassigned_cnt}건")
 
             st.divider()
 
@@ -2617,29 +2623,32 @@ if user == 'ADMIN':
 
             # ── 휴가 배정 금지 과목 설정 ──────────────────────────────────
             st.markdown("##### 🚫 휴가 배정 금지 과목")
-            st.caption("체크한 과목의 턴에는 휴가가 배정되지 않습니다.")
+            st.caption("체크한 과목(지역)의 턴에는 휴가가 배정되지 않습니다.")
             _blk_depts = st.session_state.vacation_blocked_depts
-            # 스케줄에서 모든 과목 추출
-            _all_depts = set()
+            # 스케줄에서 모든 과목(지역) 조합 추출
+            _all_dept_locs = set()
             for _nm in mgr.df.index:
                 for _col in mgr.df.columns:
                     _v = mgr.df.loc[_nm, _col]
                     if _v and str(_v) not in ('None', '', 'nan'):
-                        _, _d = mgr.parse_cell(_v)
+                        _loc, _d = mgr.parse_cell(_v)
                         if _d:
-                            _all_depts.add(_d)
-            _all_depts_sorted = sorted(_all_depts)
-            _dept_cols = st.columns(min(len(_all_depts_sorted), 4))
-            for _idx, _dept in enumerate(_all_depts_sorted):
-                with _dept_cols[_idx % len(_dept_cols)]:
-                    _chk = st.checkbox(f"{_dept}", value=(_dept in _blk_depts),
-                                       key=f"blk_dept_{_dept}")
+                            _loc = _loc or DEFAULT_LOCATION
+                            _label = f"{_d}({_loc})" if _loc != DEFAULT_LOCATION else _d
+                            _all_dept_locs.add(_label)
+            _all_dept_locs_sorted = sorted(_all_dept_locs)
+            _n_cols = min(len(_all_dept_locs_sorted), 4) or 1
+            _dept_cols = st.columns(_n_cols)
+            for _idx, _dl in enumerate(_all_dept_locs_sorted):
+                with _dept_cols[_idx % _n_cols]:
+                    _chk = st.checkbox(f"{_dl}", value=(_dl in _blk_depts),
+                                       key=f"blk_dept_{_dl}")
                     if _chk:
-                        _blk_depts.add(_dept)
+                        _blk_depts.add(_dl)
                     else:
-                        _blk_depts.discard(_dept)
+                        _blk_depts.discard(_dl)
             if _blk_depts:
-                st.info(f"🚫 금지 과목: {', '.join(sorted(_blk_depts))}")
+                st.info(f"🚫 금지: {', '.join(sorted(_blk_depts))}")
 
             st.divider()
 
