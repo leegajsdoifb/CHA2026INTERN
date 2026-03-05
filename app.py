@@ -1254,17 +1254,20 @@ class DataManager:
             '2차': vac.get('2차'),
         }
 
-    def auto_derive_vacation_turn(self, name, period, vac_group):
+    def auto_derive_vacation_turn(self, name, period, vac_group, blocked_turns=None):
         """
         스케줄을 보고 휴가 배정 가능한 턴을 자동 탐지.
         vac_group: 'A' → IM(분당) / 'B' → EMC(분당) / 'C' → 나머지 과
         A·B는 대체근무 세트 (IM↔EMC 짝)
+        blocked_turns: 관리자가 금지한 턴 집합 (예: {'5턴', '6턴'})
         반환: (turn: str or None, dept: str or None, error_msg: str or None)
         """
         period_turns = sorted(
             VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
             key=lambda x: int(x.replace('턴', ''))
         )
+        if blocked_turns:
+            period_turns = [t for t in period_turns if t not in blocked_turns]
         if name not in self.df.index:
             return None, None, f"{name}을(를) 스케줄에서 찾을 수 없습니다."
 
@@ -1333,15 +1336,18 @@ class DataManager:
         turn, dept = valid_candidates[0]
         return turn, dept, None
 
-    def _get_all_vacation_candidates(self, name, period, vac_group):
+    def _get_all_vacation_candidates(self, name, period, vac_group, blocked_turns=None):
         """
         auto_derive_vacation_turn과 동일 로직이지만 모든 유효 후보 턴을 반환.
+        blocked_turns: 관리자가 금지한 턴 집합
         반환: (candidates: [(turn, dept)], error_msg: str|None)
         """
         period_turns = sorted(
             VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
             key=lambda x: int(x.replace('턴', ''))
         )
+        if blocked_turns:
+            period_turns = [t for t in period_turns if t not in blocked_turns]
         if name not in self.df.index:
             return [], f"{name}을(를) 스케줄에서 찾을 수 없습니다."
 
@@ -1435,9 +1441,10 @@ class DataManager:
             self.save_db()
         return True, f"{name} {period} 휴가 초기화 완료"
 
-    def auto_assign_all_vacations(self):
+    def auto_assign_all_vacations(self, blocked_turns_map=None):
         """
         모든 인턴 휴가 자동 배정 (1차·2차 각각).
+        blocked_turns_map: {'1차': set(), '2차': set()} 관리자 금지 턴
         우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
         턴별·주차별 부하를 고루 분배하여 배정.
         반환: [{'name': str, 'success': [msg,...], 'errors': [msg,...]}]
@@ -1446,6 +1453,7 @@ class DataManager:
                    for name in self.df.index}
 
         for period in ('1차', '2차'):
+            blocked = (blocked_turns_map or {}).get(period, set())
             turn_load = {}   # {turn: count} – 이번 기간 턴별 배정 인원
             week_load = {1: 0, 2: 0, 3: 0, 4: 0}  # 전역 주차별 배정 인원
 
@@ -1466,7 +1474,7 @@ class DataManager:
             for name in self.df.index:
                 placed = False
                 for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
-                    cands, err = self._get_all_vacation_candidates(name, period, group)
+                    cands, err = self._get_all_vacation_candidates(name, period, group, blocked_turns=blocked)
                     if cands:
                         assignable.append((name, prefix, cands))
                         placed = True
@@ -1559,10 +1567,11 @@ class DataManager:
             return f"{period}에 {tl} 턴이 없습니다. 턴 교환을 통해 해결할 수 있습니다."
         return "수동 배정 또는 턴 교환을 통해 해결할 수 있습니다."
 
-    def preview_vacation_assignments(self):
+    def preview_vacation_assignments(self, blocked_turns_map=None):
         """
         전체 인턴 휴가 자동 배정 미리보기 (저장 안 함).
         턴별·주차별 부하를 고루 분배. 실패 시 사유+해결 제안 포함.
+        blocked_turns_map: {'1차': set(), '2차': set()} 관리자 금지 턴
         """
         from datetime import datetime as _dt
         GROUP_LABELS = {'A': 'IM', 'B': 'EMC', 'C': 'IM·EMC외 분당/파견'}
@@ -1570,6 +1579,7 @@ class DataManager:
         intern_asgn = {name: {} for name in self.df.index}
 
         for period in ('1차', '2차'):
+            blocked = (blocked_turns_map or {}).get(period, set())
             turn_load = {}   # {turn: count}
             week_load = {1: 0, 2: 0, 3: 0, 4: 0}  # 전역 주차별 배정 인원
             slot_map  = {}   # {(turn, prefix): [(name, dept)]}
@@ -1590,7 +1600,7 @@ class DataManager:
                 placed = False
                 tried = []
                 for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
-                    cands, err = self._get_all_vacation_candidates(name, period, group)
+                    cands, err = self._get_all_vacation_candidates(name, period, group, blocked_turns=blocked)
                     if cands:
                         assignable.append((name, prefix, cands))
                         placed = True
@@ -2127,6 +2137,8 @@ if 'mkt_post_success' not in st.session_state:
     st.session_state.mkt_post_success = ''
 if 'vacation_preview' not in st.session_state:
     st.session_state.vacation_preview = None
+if 'vacation_blocked_turns' not in st.session_state:
+    st.session_state.vacation_blocked_turns = {'1차': set(), '2차': set()}
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
 if 'user_id' not in st.session_state:
@@ -2600,12 +2612,47 @@ if user == 'ADMIN':
                 "먼저 **미리보기**로 결과를 확인한 후 확정할 수 있습니다."
             )
 
+            # ── 휴가 배정 금지 턴 설정 ──────────────────────────────────
+            st.markdown("##### 🚫 휴가 배정 금지 턴")
+            st.caption("체크한 턴에는 휴가가 배정되지 않습니다.")
+            _blk = st.session_state.vacation_blocked_turns
+            _bc1, _bc2 = st.columns(2)
+            with _bc1:
+                st.markdown("**1차 기간**")
+                for _bt in sorted(VACATION_PERIOD_1, key=lambda x: int(x.replace('턴', ''))):
+                    _chk = st.checkbox(f"{_bt} 금지", value=(_bt in _blk['1차']),
+                                       key=f"blk_1_{_bt}")
+                    if _chk:
+                        _blk['1차'].add(_bt)
+                    else:
+                        _blk['1차'].discard(_bt)
+            with _bc2:
+                st.markdown("**2차 기간**")
+                for _bt in sorted(VACATION_PERIOD_2, key=lambda x: int(x.replace('턴', ''))):
+                    _chk = st.checkbox(f"{_bt} 금지", value=(_bt in _blk['2차']),
+                                       key=f"blk_2_{_bt}")
+                    if _chk:
+                        _blk['2차'].add(_bt)
+                    else:
+                        _blk['2차'].discard(_bt)
+            _any_blocked = _blk['1차'] or _blk['2차']
+            if _any_blocked:
+                _b_summary = []
+                if _blk['1차']:
+                    _b_summary.append(f"1차: {', '.join(sorted(_blk['1차'], key=lambda x: int(x.replace('턴',''))))}")
+                if _blk['2차']:
+                    _b_summary.append(f"2차: {', '.join(sorted(_blk['2차'], key=lambda x: int(x.replace('턴',''))))}")
+                st.info(f"🚫 금지 턴: {' / '.join(_b_summary)}")
+
+            st.divider()
+
             if st.session_state.vacation_preview is None:
                 # ── 미리보기 버튼 ─────────────────────────────────────────
                 if st.button("🔍 전체 자동 배정 미리보기", type="primary",
                              use_container_width=True, key="adm_preview_all"):
                     with st.spinner("전체 인턴 휴가 자동 배정 미리보기 중..."):
-                        preview = mgr.preview_vacation_assignments()
+                        preview = mgr.preview_vacation_assignments(
+                            blocked_turns_map=st.session_state.vacation_blocked_turns)
                     st.session_state.vacation_preview = preview
                     st.rerun()
             else:
@@ -2713,7 +2760,8 @@ if user == 'ADMIN':
                     if st.button("🔄 다시 돌리기", use_container_width=True,
                                  key="adm_retry_preview"):
                         with st.spinner("다시 랜덤 배정 중..."):
-                            new_preview = mgr.preview_vacation_assignments()
+                            new_preview = mgr.preview_vacation_assignments(
+                                blocked_turns_map=st.session_state.vacation_blocked_turns)
                         st.session_state.vacation_preview = new_preview
                         st.rerun()
                 with col_cancel:
