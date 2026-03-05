@@ -817,7 +817,7 @@ class DataManager:
             # 각 사람이 동일 턴에 두 번 교환하는 경우 방지
             person_turn_used = set()
             for s in all_swaps:
-                pa, pb, t = get_person_a(s), s['partner'], s['turn']
+                pa, pb, t = sender, s['partner'], s['turn']
                 if (pa, t) in person_turn_used or (pb, t) in person_turn_used:
                     return None
                 person_turn_used.add((pa, t))
