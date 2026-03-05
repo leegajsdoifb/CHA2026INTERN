@@ -1318,14 +1318,14 @@ class DataManager:
             return None, None, (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
                                 f"{dept_label} 배치 턴이 없습니다.")
 
-        # 내/외/산/소 2개 이상 규칙: 해당 과 전체(모든 지역) 2개↑ 있어야 휴가 가능
+        # 내/외/산/소 2개 이상 규칙: 해당 기간 내 같은 과 2개↑ 있어야 휴가 가능
         ESSENTIAL_VACATION_DEPTS = ('IM', 'GS', 'OB', 'PE')
         valid_candidates = []
         for t, dept in candidates:
             if dept in ESSENTIAL_VACATION_DEPTS:
                 total_dept = sum(
-                    1 for col in self.df.columns
-                    if (lambda v: (
+                    1 for col in period_turns
+                    if col in self.df.columns and (lambda v: (
                         self.parse_cell(v)[1] == dept
                     ) if v and str(v) not in ('None','') else False)(
                         self.df.loc[name, col])
@@ -1336,7 +1336,7 @@ class DataManager:
 
         if not valid_candidates:
             return None, None, (f"{name}의 {period} 기간에 휴가 가능한 턴이 없습니다 "
-                                f"(내/외/산/소는 전체 최소 2개 필요).")
+                                f"(내/외/산/소는 해당 기간 내 최소 2개 필요).")
 
         turn, dept = valid_candidates[0]
         return turn, dept, None
@@ -1400,14 +1400,14 @@ class DataManager:
             return [], (f"{name}의 {period} 기간({', '.join(period_turns)}) 중 "
                         f"{dept_label} 배치 턴이 없습니다.")
 
-        # 내/외/산/소 2개 이상 규칙: 해당 과 전체(모든 지역) 2개↑ 있어야 휴가 가능
+        # 내/외/산/소 2개 이상 규칙: 해당 기간 내 같은 과 2개↑ 있어야 휴가 가능
         ESSENTIAL_VACATION_DEPTS = ('IM', 'GS', 'OB', 'PE')
         valid_candidates = []
         for t, dept in candidates:
             if dept in ESSENTIAL_VACATION_DEPTS:
                 total_dept = sum(
-                    1 for col in self.df.columns
-                    if (lambda v: (
+                    1 for col in period_turns
+                    if col in self.df.columns and (lambda v: (
                         self.parse_cell(v)[1] == dept
                     ) if v and str(v) not in ('None','') else False)(
                         self.df.loc[name, col])
@@ -1418,30 +1418,41 @@ class DataManager:
 
         if not valid_candidates:
             return [], (f"{name}의 {period} 기간에 휴가 가능한 턴이 없습니다 "
-                        f"(내/외/산/소는 전체 최소 2개 필요).")
+                        f"(내/외/산/소는 해당 기간 내 최소 2개 필요).")
 
         return valid_candidates, None
 
-    def set_intern_vacation(self, name, period, vac_type):
+    def set_intern_vacation(self, name, period, vac_type, turn=None):
         """
-        휴가 타입(vac_type)을 받아 스케줄에서 자동으로 휴가 턴을 탐지해 저장.
+        휴가 타입(vac_type)을 받아 저장.
+        turn이 지정되면 그대로 사용, 없으면 스케줄에서 자동 탐지.
         period  : '1차' or '2차'
         vac_type: 'A1'~'A4' (IM) / 'B1'~'B4' (EMC) / 'C1'~'C4' (기타분당·파견)
+        turn    : 직접 지정할 턴 (예: '4턴'). None이면 자동 탐지.
         반환: (ok: bool, msg: str)
         """
         if vac_type not in VACATION_TYPES:
             return False, f"휴가 유형이 올바르지 않습니다: {vac_type}"
 
-        group = self.get_vacation_group(vac_type)
-        turn, dept, err = self.auto_derive_vacation_turn(name, period, group)
-        if err:
-            return False, err
+        if turn:
+            # 턴이 직접 지정된 경우 (미리보기/자동배정에서 결정된 턴 재사용)
+            dept = None
+            if name in self.df.index and turn in self.df.columns:
+                val = self.df.loc[name, turn]
+                if val and str(val) not in ('None', '', 'nan'):
+                    _, dept = self.parse_cell(val)
+        else:
+            # 턴 자동 탐지 (개별 배정 폼 등)
+            group = self.get_vacation_group(vac_type)
+            turn, dept, err = self.auto_derive_vacation_turn(name, period, group)
+            if err:
+                return False, err
 
         if name not in self.vacation_data:
             self.vacation_data[name] = {}
         self.vacation_data[name][period] = {'turn': turn, 'type': vac_type}
         self.save_db()
-        return True, f"✅ {name} {period} 휴가 자동 배정: **{turn}** ({dept or '파견'} / {vac_type})"
+        return True, f"✅ {name} {period} 휴가 배정: **{turn}** ({dept or '파견'} / {vac_type})"
 
     def clear_intern_vacation(self, name, period):
         """특정 인턴의 1차 또는 2차 휴가 배정 초기화"""
@@ -1513,7 +1524,7 @@ class DataManager:
                 week = turn_to_week.get(turn, 1)
                 vac_type = f"{prefix}{week}"
                 for name, dept in interns:
-                    ok, msg = self.set_intern_vacation(name, period, vac_type)
+                    ok, msg = self.set_intern_vacation(name, period, vac_type, turn=turn)
                     if ok:
                         results[name]['success'].append(msg)
                     else:
@@ -1695,7 +1706,8 @@ class DataManager:
                         results[name]['errors'].append(
                             f"❌ {period}: 적합한 휴가 턴을 찾지 못했습니다.")
                     continue
-                ok, msg = self.set_intern_vacation(name, period, pd_['vac_type'])
+                ok, msg = self.set_intern_vacation(name, period, pd_['vac_type'],
+                                                    turn=pd_.get('turn'))
                 if ok:
                     results[name]['success'].append(msg)
                 else:
