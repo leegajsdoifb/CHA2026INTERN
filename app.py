@@ -674,11 +674,12 @@ class DataManager:
         return results
 
     # ── 복합 교환 요청 (체인) ──────────────────────────────────────────────────
-    def add_chain_request(self, sender, swaps, message=''):
+    def add_chain_request(self, sender, swaps, message='', messages=None):
         """
         복합 교환을 체인 요청으로 묶어서 등록.
         swaps: [{'receiver': ..., 'turn': ...}, ...]
         모든 상대방이 수락해야만 일괄 실행.
+        messages: {receiver: msg} 상대방별 개별 메시지 (있으면 message보다 우선)
         """
         chain_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
         created_reqs = []
@@ -713,7 +714,7 @@ class DataManager:
                 "val_receiver": val_b,
                 "status":       "pending",
                 "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "message":      message
+                "message":      (messages or {}).get(receiver, message)
             })
 
         # 체인 전체에 대해 사전 검증 (동시에 모든 교환이 이뤄진다고 가정)
@@ -1254,20 +1255,18 @@ class DataManager:
             '2차': vac.get('2차'),
         }
 
-    def auto_derive_vacation_turn(self, name, period, vac_group, blocked_turns=None):
+    def auto_derive_vacation_turn(self, name, period, vac_group, blocked_depts=None):
         """
         스케줄을 보고 휴가 배정 가능한 턴을 자동 탐지.
         vac_group: 'A' → IM(분당) / 'B' → EMC(분당) / 'C' → 나머지 과
         A·B는 대체근무 세트 (IM↔EMC 짝)
-        blocked_turns: 관리자가 금지한 턴 집합 (예: {'5턴', '6턴'})
+        blocked_depts: 관리자가 금지한 과목 집합 (예: {'IM', 'GS'})
         반환: (turn: str or None, dept: str or None, error_msg: str or None)
         """
         period_turns = sorted(
             VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
             key=lambda x: int(x.replace('턴', ''))
         )
-        if blocked_turns:
-            period_turns = [t for t in period_turns if t not in blocked_turns]
         if name not in self.df.index:
             return None, None, f"{name}을(를) 스케줄에서 찾을 수 없습니다."
 
@@ -1290,6 +1289,10 @@ class DataManager:
 
             # EMC(소아) 턴은 휴가 배정 금지
             if dept == 'EMC' and loc == '소아':
+                continue
+
+            # 관리자 금지 과목 필터
+            if blocked_depts and dept in blocked_depts:
                 continue
 
             if vac_group in ('A', 'B'):
@@ -1336,18 +1339,16 @@ class DataManager:
         turn, dept = valid_candidates[0]
         return turn, dept, None
 
-    def _get_all_vacation_candidates(self, name, period, vac_group, blocked_turns=None):
+    def _get_all_vacation_candidates(self, name, period, vac_group, blocked_depts=None):
         """
         auto_derive_vacation_turn과 동일 로직이지만 모든 유효 후보 턴을 반환.
-        blocked_turns: 관리자가 금지한 턴 집합
+        blocked_depts: 관리자가 금지한 과목 집합
         반환: (candidates: [(turn, dept)], error_msg: str|None)
         """
         period_turns = sorted(
             VACATION_PERIOD_1 if period == '1차' else VACATION_PERIOD_2,
             key=lambda x: int(x.replace('턴', ''))
         )
-        if blocked_turns:
-            period_turns = [t for t in period_turns if t not in blocked_turns]
         if name not in self.df.index:
             return [], f"{name}을(를) 스케줄에서 찾을 수 없습니다."
 
@@ -1368,6 +1369,10 @@ class DataManager:
 
             # EMC(소아) 턴은 휴가 배정 금지
             if dept == 'EMC' and loc == '소아':
+                continue
+
+            # 관리자 금지 과목 필터
+            if blocked_depts and dept in blocked_depts:
                 continue
 
             if vac_group in ('A', 'B'):
@@ -1441,10 +1446,10 @@ class DataManager:
             self.save_db()
         return True, f"{name} {period} 휴가 초기화 완료"
 
-    def auto_assign_all_vacations(self, blocked_turns_map=None):
+    def auto_assign_all_vacations(self, blocked_depts=None):
         """
         모든 인턴 휴가 자동 배정 (1차·2차 각각).
-        blocked_turns_map: {'1차': set(), '2차': set()} 관리자 금지 턴
+        blocked_depts: set() 관리자 금지 과목 (예: {'IM', 'GS'})
         우선순위: A(IM) → B(EMC) → C(기타 분당 과 또는 파견병원)
         턴별·주차별 부하를 고루 분배하여 배정.
         반환: [{'name': str, 'success': [msg,...], 'errors': [msg,...]}]
@@ -1453,7 +1458,6 @@ class DataManager:
                    for name in self.df.index}
 
         for period in ('1차', '2차'):
-            blocked = (blocked_turns_map or {}).get(period, set())
             turn_load = {}   # {turn: count} – 이번 기간 턴별 배정 인원
             week_load = {1: 0, 2: 0, 3: 0, 4: 0}  # 전역 주차별 배정 인원
 
@@ -1474,7 +1478,7 @@ class DataManager:
             for name in self.df.index:
                 placed = False
                 for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
-                    cands, err = self._get_all_vacation_candidates(name, period, group, blocked_turns=blocked)
+                    cands, err = self._get_all_vacation_candidates(name, period, group, blocked_depts=blocked_depts)
                     if cands:
                         assignable.append((name, prefix, cands))
                         placed = True
@@ -1567,11 +1571,11 @@ class DataManager:
             return f"{period}에 {tl} 턴이 없습니다. 턴 교환을 통해 해결할 수 있습니다."
         return "수동 배정 또는 턴 교환을 통해 해결할 수 있습니다."
 
-    def preview_vacation_assignments(self, blocked_turns_map=None):
+    def preview_vacation_assignments(self, blocked_depts=None):
         """
         전체 인턴 휴가 자동 배정 미리보기 (저장 안 함).
         턴별·주차별 부하를 고루 분배. 실패 시 사유+해결 제안 포함.
-        blocked_turns_map: {'1차': set(), '2차': set()} 관리자 금지 턴
+        blocked_depts: set() 관리자 금지 과목 (예: {'IM', 'GS'})
         """
         from datetime import datetime as _dt
         GROUP_LABELS = {'A': 'IM', 'B': 'EMC', 'C': 'IM·EMC외 분당/파견'}
@@ -1579,7 +1583,6 @@ class DataManager:
         intern_asgn = {name: {} for name in self.df.index}
 
         for period in ('1차', '2차'):
-            blocked = (blocked_turns_map or {}).get(period, set())
             turn_load = {}   # {turn: count}
             week_load = {1: 0, 2: 0, 3: 0, 4: 0}  # 전역 주차별 배정 인원
             slot_map  = {}   # {(turn, prefix): [(name, dept)]}
@@ -1600,7 +1603,7 @@ class DataManager:
                 placed = False
                 tried = []
                 for group, prefix in [('A', 'A'), ('B', 'B'), ('C', 'C')]:
-                    cands, err = self._get_all_vacation_candidates(name, period, group, blocked_turns=blocked)
+                    cands, err = self._get_all_vacation_candidates(name, period, group, blocked_depts=blocked_depts)
                     if cands:
                         assignable.append((name, prefix, cands))
                         placed = True
@@ -2137,8 +2140,8 @@ if 'mkt_post_success' not in st.session_state:
     st.session_state.mkt_post_success = ''
 if 'vacation_preview' not in st.session_state:
     st.session_state.vacation_preview = None
-if 'vacation_blocked_turns' not in st.session_state:
-    st.session_state.vacation_blocked_turns = {'1차': set(), '2차': set()}
+if 'vacation_blocked_depts' not in st.session_state:
+    st.session_state.vacation_blocked_depts = set()
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
 if 'user_id' not in st.session_state:
@@ -2612,37 +2615,31 @@ if user == 'ADMIN':
                 "먼저 **미리보기**로 결과를 확인한 후 확정할 수 있습니다."
             )
 
-            # ── 휴가 배정 금지 턴 설정 ──────────────────────────────────
-            st.markdown("##### 🚫 휴가 배정 금지 턴")
-            st.caption("체크한 턴에는 휴가가 배정되지 않습니다.")
-            _blk = st.session_state.vacation_blocked_turns
-            _bc1, _bc2 = st.columns(2)
-            with _bc1:
-                st.markdown("**1차 기간**")
-                for _bt in sorted(VACATION_PERIOD_1, key=lambda x: int(x.replace('턴', ''))):
-                    _chk = st.checkbox(f"{_bt} 금지", value=(_bt in _blk['1차']),
-                                       key=f"blk_1_{_bt}")
+            # ── 휴가 배정 금지 과목 설정 ──────────────────────────────────
+            st.markdown("##### 🚫 휴가 배정 금지 과목")
+            st.caption("체크한 과목의 턴에는 휴가가 배정되지 않습니다.")
+            _blk_depts = st.session_state.vacation_blocked_depts
+            # 스케줄에서 모든 과목 추출
+            _all_depts = set()
+            for _nm in mgr.df.index:
+                for _col in mgr.df.columns:
+                    _v = mgr.df.loc[_nm, _col]
+                    if _v and str(_v) not in ('None', '', 'nan'):
+                        _, _d = mgr.parse_cell(_v)
+                        if _d:
+                            _all_depts.add(_d)
+            _all_depts_sorted = sorted(_all_depts)
+            _dept_cols = st.columns(min(len(_all_depts_sorted), 4))
+            for _idx, _dept in enumerate(_all_depts_sorted):
+                with _dept_cols[_idx % len(_dept_cols)]:
+                    _chk = st.checkbox(f"{_dept}", value=(_dept in _blk_depts),
+                                       key=f"blk_dept_{_dept}")
                     if _chk:
-                        _blk['1차'].add(_bt)
+                        _blk_depts.add(_dept)
                     else:
-                        _blk['1차'].discard(_bt)
-            with _bc2:
-                st.markdown("**2차 기간**")
-                for _bt in sorted(VACATION_PERIOD_2, key=lambda x: int(x.replace('턴', ''))):
-                    _chk = st.checkbox(f"{_bt} 금지", value=(_bt in _blk['2차']),
-                                       key=f"blk_2_{_bt}")
-                    if _chk:
-                        _blk['2차'].add(_bt)
-                    else:
-                        _blk['2차'].discard(_bt)
-            _any_blocked = _blk['1차'] or _blk['2차']
-            if _any_blocked:
-                _b_summary = []
-                if _blk['1차']:
-                    _b_summary.append(f"1차: {', '.join(sorted(_blk['1차'], key=lambda x: int(x.replace('턴',''))))}")
-                if _blk['2차']:
-                    _b_summary.append(f"2차: {', '.join(sorted(_blk['2차'], key=lambda x: int(x.replace('턴',''))))}")
-                st.info(f"🚫 금지 턴: {' / '.join(_b_summary)}")
+                        _blk_depts.discard(_dept)
+            if _blk_depts:
+                st.info(f"🚫 금지 과목: {', '.join(sorted(_blk_depts))}")
 
             st.divider()
 
@@ -2652,7 +2649,7 @@ if user == 'ADMIN':
                              use_container_width=True, key="adm_preview_all"):
                     with st.spinner("전체 인턴 휴가 자동 배정 미리보기 중..."):
                         preview = mgr.preview_vacation_assignments(
-                            blocked_turns_map=st.session_state.vacation_blocked_turns)
+                            blocked_depts=st.session_state.vacation_blocked_depts)
                     st.session_state.vacation_preview = preview
                     st.rerun()
             else:
@@ -2761,7 +2758,7 @@ if user == 'ADMIN':
                                  key="adm_retry_preview"):
                         with st.spinner("다시 랜덤 배정 중..."):
                             new_preview = mgr.preview_vacation_assignments(
-                                blocked_turns_map=st.session_state.vacation_blocked_turns)
+                                blocked_depts=st.session_state.vacation_blocked_depts)
                         st.session_state.vacation_preview = new_preview
                         st.rerun()
                 with col_cancel:
@@ -3047,13 +3044,13 @@ with st.sidebar:
                     total = len(chain_all)
                     accepted = sum(1 for r in chain_all if r['status'] == 'chain_accepted')
                     st.caption(f"체인 {total}건 중 {accepted}건 수락됨 | 모두 수락 시 일괄 실행")
-                    if reqs[0].get('message'):
-                        st.info(f"💬 {reqs[0]['message']}")
                     for req in reqs:
                         snd_v = mgr.df.loc[req['sender'], req['turn']] if req['sender'] in mgr.df.index else '?'
                         my_v  = mgr.df.loc[user, req['turn']]          if user          in mgr.df.index else '?'
                         _ch_tlbl = mgr.turn_label(user, req['turn'])
                         st.write(f"  • **{_ch_tlbl}**: `{snd_v}` ↔ 나: `{my_v}`")
+                        if req.get('message'):
+                            st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;💬 {req['message']}")
                     ca, cb = st.columns(2)
                     # 체인은 내게 해당하는 건만 일괄 수락/거절
                     my_chain_reqs = [r for r in reqs if r['status'] == 'pending']
@@ -3345,11 +3342,15 @@ st.title("🏥 차병원 인턴 턴표 교환소")
 def multi_confirm_dialog():
     items = st.session_state.multi_confirm
     st.write(f"다음 교환 **{len(items)}건**을 신청합니다:")
+    # 각 항목 표시 + 상대방별 메시지 입력
+    mc_messages = {}
     for i, it in enumerate(items):
         num = '①②③④⑤'[i] if i < 5 else f'{i+1}.'
         st.write(f"{num} **{it['turn']}** &nbsp; 나: `{it['my_val']}` ↔ **{it['target']}**: `{it['partner_val']}`")
-    mc_message = st.text_input("요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
-                               max_chars=100, key="mc_msg")
+        mc_messages[it['target']] = st.text_input(
+            f"→ {it['target']}에게 메시지 (선택)",
+            placeholder="교환 사유, 연락처 등",
+            max_chars=100, key=f"mc_msg_{i}")
     col_yes, col_no = st.columns(2)
     if col_yes.button("✅ 요청 보내기", type="primary", use_container_width=True):
         with st.spinner("최신 데이터 확인 및 재검증 중..."):
@@ -3361,10 +3362,11 @@ def multi_confirm_dialog():
         else:
             if len(items) == 1:
                 succ, msg = mgr.add_request(user, items[0]['target'],
-                                            items[0]['turn'], message=mc_message)
+                                            items[0]['turn'],
+                                            message=mc_messages.get(items[0]['target'], ''))
             else:
                 swaps = [{'receiver': it['target'], 'turn': it['turn']} for it in items]
-                succ, msg = mgr.add_chain_request(user, swaps, message=mc_message)
+                succ, msg = mgr.add_chain_request(user, swaps, messages=mc_messages)
             st.session_state.multi_confirm = None
             st.session_state.exchange_items = []
             if succ:
