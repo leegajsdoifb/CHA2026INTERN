@@ -1854,6 +1854,18 @@ h3 { font-size: 1.15rem !important; }
 
 /* 캡션 텍스트 */
 .stCaption, small { font-size: 0.9rem !important; }
+
+/* 다크모드 표 텍스트 대비 보정 — 배경색이 밝은 셀에서 글씨가 안 보이는 문제 */
+@media (prefers-color-scheme: dark) {
+    .stDataFrame td, .stDataFrame th {
+        color: #222 !important;
+    }
+}
+/* Streamlit 다크테마에서도 적용 */
+[data-theme="dark"] .stDataFrame td,
+[data-theme="dark"] .stDataFrame th {
+    color: #222 !important;
+}
 </style>
 """
 
@@ -2126,7 +2138,7 @@ if user == 'ADMIN':
 
             def _adm_style_table(row):
                 return [
-                    "background-color:#e8d5f5;" if (row.name, c) in _adm_vac_cells else ""
+                    "background-color:#e8d5f5;color:#222;" if (row.name, c) in _adm_vac_cells else ""
                     for c in row.index
                 ]
             st.dataframe(
@@ -3095,14 +3107,14 @@ def style_table(row):
     for col in row.index:
         s = ""
         if row.name == user:
-            s += "background-color:#fffde7;font-weight:bold;"
+            s += "background-color:#fffde7;color:#222;font-weight:bold;"
         elif row.name in sel_targets:
-            s += "background-color:#e3f2fd;"
+            s += "background-color:#e3f2fd;color:#222;"
         if (row.name, col) in highlight_pairs:
-            s += "border:3px solid #e53935;background-color:#ffcdd2;"
+            s += "border:3px solid #e53935;background-color:#ffcdd2;color:#222;"
         elif (row.name, col) in _vac_cells:
             # 휴가 턴 음영 (연보라색)
-            s += "background-color:#e8d5f5;"
+            s += "background-color:#e8d5f5;color:#222;"
         styles.append(s)
     return styles
 
