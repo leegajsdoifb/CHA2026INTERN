@@ -25,8 +25,8 @@ DEFAULT_LOCATION = '분당'
 LOCKED_TURNS     = {'1턴', '2턴'}   # 교환 불가 턴
 
 # ── 휴가 관련 상수 ─────────────────────────────────────────────────────────────
-VACATION_PERIOD_1  = {'4턴', '5턴', '6턴', '7턴'}   # 1차 휴가 기간
-VACATION_PERIOD_2  = {'8턴', '9턴', '10턴', '11턴'} # 2차 휴가 기간
+VACATION_PERIOD_1  = {'4턴', '5턴', '6턴', '7턴'}           # 1차 휴가 기간
+VACATION_PERIOD_2  = {'8턴', '9턴', '10턴', '11턴', '12턴', '13턴'}  # 2차 휴가 기간
 BUNDANG_MIN_TURNS  = 7   # 분당 근무 최소 턴 수 (전체 13개 중)
 
 HISTORY_HEADER = ['날짜시간', '신청자', '상대방', '교환턴',
@@ -1736,8 +1736,8 @@ if user == 'ADMIN':
     st.title("🔐 관리자 대시보드")
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
-    adm_tab1, adm_tab2, adm_tab3, adm_tab4, adm_tab5 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리"
+    adm_tab1, adm_tab2, adm_tab6, adm_tab3, adm_tab4, adm_tab5 = st.tabs([
+        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -2056,6 +2056,90 @@ if user == 'ADMIN':
             })
         if pw_rows:
             st.dataframe(pd.DataFrame(pw_rows), use_container_width=True, hide_index=True)
+
+    # ── 관리자 탭6: 휴가 현황 ────────────────────────────────────────────────
+    with adm_tab6:
+        st.subheader("🏖️ 휴가 배정 현황")
+
+        if not mgr.vacation_data:
+            st.warning("휴가 데이터가 없습니다. 휴가 시트를 확인하세요.")
+        else:
+            # ── 요약 메트릭 ──
+            total_interns = len(mgr.df.index)
+            interns_with_vac = len(mgr.vacation_data)
+            has_both = sum(1 for v in mgr.vacation_data.values()
+                          if v.get('1차') and v.get('2차'))
+            has_one  = sum(1 for v in mgr.vacation_data.values()
+                          if bool(v.get('1차')) != bool(v.get('2차')))
+            no_vac   = total_interns - interns_with_vac
+
+            vm1, vm2, vm3, vm4 = st.columns(4)
+            vm1.metric("전체 인턴", total_interns)
+            vm2.metric("휴가 2회", has_both)
+            vm3.metric("휴가 1회", has_one)
+            vm4.metric("휴가 없음", no_vac)
+
+            # ── 턴별 휴가 인원 분포 ──
+            st.subheader("📊 턴별 휴가 인원")
+            turn_counts = {}
+            for name, vac in mgr.vacation_data.items():
+                for period in ('1차', '2차'):
+                    vi = vac.get(period)
+                    if vi and vi.get('turn'):
+                        t = vi['turn']
+                        turn_counts[t] = turn_counts.get(t, 0) + 1
+
+            if turn_counts:
+                sorted_turns = sorted(turn_counts.keys(),
+                                      key=lambda x: int(re.search(r'\d+', x).group()))
+                turn_chart_df = pd.DataFrame({
+                    '턴': sorted_turns,
+                    '휴가 인원': [turn_counts[t] for t in sorted_turns]
+                }).set_index('턴')
+                st.bar_chart(turn_chart_df)
+
+            # ── 타입별 인원 분포 ──
+            st.subheader("📊 휴가 타입별 인원")
+            type_counts = {}
+            for name, vac in mgr.vacation_data.items():
+                for period in ('1차', '2차'):
+                    vi = vac.get(period)
+                    if vi and vi.get('type'):
+                        vtype = vi['type']
+                        type_counts[vtype] = type_counts.get(vtype, 0) + 1
+            if type_counts:
+                type_df = pd.DataFrame([
+                    {'타입': k, '인원': v}
+                    for k, v in sorted(type_counts.items())
+                ])
+                st.dataframe(type_df, use_container_width=True, hide_index=True)
+
+            # ── 전체 인턴 휴가 배정 목록 ──
+            st.subheader("📋 인턴별 휴가 배정")
+            vac_rows = []
+            for intern in mgr.df.index:
+                vac = mgr.vacation_data.get(intern, {})
+                v1 = vac.get('1차')
+                v2 = vac.get('2차')
+                vac_rows.append({
+                    '이름': intern,
+                    '1차 턴': v1['turn'] if v1 else '-',
+                    '1차 타입': v1['type'] if v1 else '-',
+                    '2차 턴': v2['turn'] if v2 else '-',
+                    '2차 타입': v2['type'] if v2 else '-',
+                    '상태': '✅' if (v1 and v2) else ('⚠️ 1회' if (v1 or v2) else '🚨 없음'),
+                })
+            vac_df = pd.DataFrame(vac_rows)
+
+            # 필터
+            vac_filter = st.radio("필터", ["전체", "✅ 2회", "⚠️ 1회", "🚨 없음"],
+                                  horizontal=True, key="adm_vac_filter")
+            if vac_filter != "전체":
+                vac_df = vac_df[vac_df['상태'] == vac_filter]
+
+            st.dataframe(vac_df, use_container_width=True, hide_index=True,
+                         height=min(80 + len(vac_df) * 35, 600))
+            st.caption(f"표시: {len(vac_df)}명")
 
     st.stop()
 
