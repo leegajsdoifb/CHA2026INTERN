@@ -202,9 +202,9 @@ class DataManager:
     # ── 휴가 데이터 (시트에서 로드) ──────────────────────────────────────────
     def _parse_vacation_sheet(self, ws):
         """
-        휴가 시트(교환용 또는 휴가용)에서 인턴별 휴가 턴·타입을 파싱.
-        시트 형식: 헤더에 '성명/이름' + 'N턴' 컬럼, 셀에 'A-1','B-2' 등 타입.
-        반환: {이름: {turn: type}}  예) {'홍길동': {'5턴': 'A-1', '10턴': 'B-2'}}
+        휴가 시트에서 인턴별 휴가 턴·타입을 파싱.
+        셀 형식: "IM\\nA-4", "GS(분당)\\nD-2" 등 (과목 + 줄바꿈 + 휴가타입).
+        반환: {이름: {turn: type}}  예) {'홍길동': {'5턴': 'A-4', '10턴': 'D-2'}}
         """
         if not ws:
             return {}
@@ -213,7 +213,7 @@ class DataManager:
             if not rows:
                 return {}
 
-            # 헤더 행 찾기
+            # 헤더 행 찾기 ('성명' 또는 '이름' 컬럼)
             header_row_idx = name_idx = None
             for row_i, row in enumerate(rows):
                 for col_i, h in enumerate(row):
@@ -235,6 +235,8 @@ class DataManager:
                 if not nxt or re.search(r'\d+\.\d+', nxt):
                     data_start += 1
 
+            vac_pattern = re.compile(r'[A-Za-z]-?\d+')
+
             result = {}
             for row in rows[data_start:]:
                 if len(row) <= name_idx:
@@ -244,11 +246,18 @@ class DataManager:
                     continue
                 for col_i, turn_name in turn_cols:
                     val = str(row[col_i]).strip() if col_i < len(row) else ''
-                    # A-1, B-2, C-1 등 휴가 타입 패턴 감지
-                    if val and re.match(r'^[A-Za-z]-?\d+$', val):
-                        if name not in result:
-                            result[name] = {}
-                        result[name][turn_name] = val
+                    if not val:
+                        continue
+                    # 셀에 줄바꿈이 있으면 각 줄을 검사, 없으면 전체를 검사
+                    lines = val.split('\n') if '\n' in val else [val]
+                    for line in lines:
+                        line = line.strip()
+                        # A-4, B-2, C-3, D-1 등 휴가 타입 패턴 (단독 매칭)
+                        if line and vac_pattern.fullmatch(line):
+                            if name not in result:
+                                result[name] = {}
+                            result[name][turn_name] = line
+                            break
             return result
         except Exception as e:
             print(f"휴가 시트 파싱 실패: {e}")
@@ -2612,13 +2621,21 @@ for i, item in enumerate(st.session_state.exchange_items):
     st.session_state.exchange_items[i]['turn']   = sel_turn
     my_v = mgr.df.loc[user,   sel_turn] if user   in mgr.df.index else '?'
     pt_v = mgr.df.loc[sel_t,  sel_turn] if sel_t  in mgr.df.index else '?'
+    # 상대방 휴가턴 정보
+    _ei_partner_vac = mgr.get_intern_vacation(sel_t) if sel_t else {}
+    _ei_pvac_parts = []
+    for _vp in ('1차', '2차'):
+        _vi = _ei_partner_vac.get(_vp)
+        if _vi and _vi.get('turn'):
+            _ei_pvac_parts.append(f"{_vp} {_vi['turn']}({_vi.get('type','-')})")
+    _ei_pvac_str = f"  🏖️ {', '.join(_ei_pvac_parts)}" if _ei_pvac_parts else ""
     # 2행: 교환 정보 | 삭제 버튼
     with c4:
         st.markdown("<div style='margin-top:28px'></div>", unsafe_allow_html=True)
         if len(st.session_state.exchange_items) > 1:
             if st.button("✕", key=f'ei_rm_{iid}', help="항목 제거", use_container_width=True):
                 to_remove.append(i)
-    st.caption(f"나: `{my_v}` ↔ **{sel_t}**: `{pt_v}`")
+    st.caption(f"나: `{my_v}` ↔ **{sel_t}**: `{pt_v}`{_ei_pvac_str}")
 
 for idx in reversed(to_remove):
     st.session_state.exchange_items.pop(idx)
