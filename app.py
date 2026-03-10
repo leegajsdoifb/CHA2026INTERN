@@ -2893,8 +2893,18 @@ if st.session_state.exchange_items:
     else:
         st.error("⚠️ 조건 불충족: " + " / ".join(errs))
 
-        # ── 가능한 조합 탐색 ──────────────────────────────────────────────────
-        if st.button("🔍 가능한 조합 찾기", key="btn_find_combo"):
+        # ── 항목 추가 + 가능한 조합 탐색 (한 줄 배치) ────────────────────────
+        _ca, _cb = st.columns(2)
+        if _ca.button("➕ 항목 추가", key="ei_add_err", use_container_width=True):
+            if others and avail_turns:
+                st.session_state.exchange_items.append({
+                    'id': st.session_state.ei_counter,
+                    'target': others[0],
+                    'turn': avail_turns[0]
+                })
+                st.session_state.ei_counter += 1
+                st.rerun()
+        if _cb.button("🔍 가능한 조합 찾기", key="btn_find_combo", use_container_width=True):
             with st.spinner("가능한 조합 탐색 중... (잠시 기다려주세요)"):
                 mandatory = [{'target': it['target'], 'turn': it['turn']}
                              for it in st.session_state.exchange_items]
@@ -2971,7 +2981,7 @@ if st.session_state.exchange_items:
                     st.divider()
 
 col_add, col_send = st.columns([1, 3])
-if col_add.button("➕ 항목 추가", key="ei_add"):
+if col_add.button("➕ 항목 추가", key="ei_add", disabled=not can_send):
     if others and avail_turns:
         st.session_state.exchange_items.append({
             'id': st.session_state.ei_counter,
