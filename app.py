@@ -675,7 +675,8 @@ class DataManager:
             v2, _ = self.validate_intern(c['partner'], sb)
             b1 = self.validate_bundang(name, sa)
             b2 = self.validate_bundang(c['partner'], sb)
-            single_valid[key] = v1 and v2 and b1 and b2
+            vac_ok, _ = self.validate_vacation_exchange(name, c['partner'], c['turn'])
+            single_valid[key] = v1 and v2 and b1 and b2 and vac_ok
 
         results = []
         n = len(candidates)
@@ -1741,8 +1742,19 @@ st.set_page_config(layout="wide", page_title="인턴 턴표 교환 시스템",
 _PC_CSS = """
 <style>
 /* 사이드바 너비 */
-section[data-testid="stSidebar"] { width: 360px !important; }
-section[data-testid="stSidebar"] > div:first-child { width: 360px !important; }
+section[data-testid="stSidebar"] { width: 400px !important; }
+section[data-testid="stSidebar"] > div:first-child { width: 400px !important; }
+
+/* 사이드바 내부 스타일 */
+section[data-testid="stSidebar"] .stExpander {
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin-bottom: 0.5rem;
+}
+section[data-testid="stSidebar"] .stExpander summary {
+    font-weight: 600;
+    font-size: 0.95rem;
+}
 
 /* 메인 컨텐츠 영역 */
 .block-container {
@@ -1753,7 +1765,12 @@ section[data-testid="stSidebar"] > div:first-child { width: 360px !important; }
 }
 
 /* 버튼 */
-.stButton > button { min-height: 2.2rem; font-size: 1rem; }
+.stButton > button {
+    min-height: 2.2rem;
+    font-size: 0.95rem;
+    border-radius: 6px;
+    transition: all 0.15s;
+}
 
 /* 선택박스·입력 레이블 */
 .stSelectbox label, .stTextInput label { font-size: 1rem !important; }
@@ -1761,10 +1778,16 @@ section[data-testid="stSidebar"] > div:first-child { width: 360px !important; }
 /* 표 */
 .stDataFrame { font-size: 0.9rem; }
 
+/* 알림 박스 */
+.stAlert { border-radius: 8px !important; }
+
 /* 제목 */
 h1 { font-size: 2rem !important; }
 h2 { font-size: 1.5rem !important; }
 h3 { font-size: 1.2rem !important; }
+
+/* 구분선 간격 축소 */
+hr { margin-top: 0.5rem !important; margin-bottom: 0.5rem !important; }
 
 /* 컬럼 간격 */
 [data-testid="column"] { padding: 0 6px !important; }
@@ -1780,9 +1803,21 @@ _MOBILE_CSS = """
     max-width: 100% !important;
 }
 [data-testid="column"] { padding: 0 2px !important; }
-.stButton > button { min-height: 2.5rem; font-size: 0.9rem; }
+.stButton > button {
+    min-height: 2.5rem;
+    font-size: 0.9rem;
+    border-radius: 6px;
+    transition: all 0.15s;
+}
 .stSelectbox label, .stTextInput label { font-size: 0.85rem !important; }
 .stDataFrame { font-size: 0.75rem; }
+.stAlert { border-radius: 8px !important; }
+.stExpander {
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    margin-bottom: 0.4rem;
+}
+hr { margin-top: 0.4rem !important; margin-bottom: 0.4rem !important; }
 h1 { font-size: 1.5rem !important; }
 h2 { font-size: 1.2rem !important; }
 h3 { font-size: 1.1rem !important; }
