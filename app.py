@@ -267,18 +267,17 @@ class DataManager:
         """
         휴가 시트(최종본)에서 휴가 데이터를 읽어 vacation_data 형식으로 반환.
         vacation_data: {이름: {'1차': {'turn':'X턴','type':'A-1'}, '2차': {'turn':'X턴','type':'B-2'}}}
+        턴 번호 순서대로 첫 번째를 1차, 두 번째를 2차로 할당.
         """
         parsed = self._parse_vacation_sheet(self.vac_holiday_ws)
         vac_data = {}
         for name, turns_dict in parsed.items():
+            # 턴 번호 오름차순 정렬
+            sorted_turns = sorted(turns_dict.items(),
+                                  key=lambda x: int(re.search(r'\d+', x[0]).group()))
             vac_data[name] = {}
-            for turn, vtype in turns_dict.items():
-                if turn in VACATION_PERIOD_1:
-                    period = '1차'
-                elif turn in VACATION_PERIOD_2:
-                    period = '2차'
-                else:
-                    continue
+            for idx, (turn, vtype) in enumerate(sorted_turns):
+                period = '1차' if idx == 0 else '2차'
                 vac_data[name][period] = {'turn': turn, 'type': vtype}
         return vac_data
 
@@ -1071,6 +1070,8 @@ class DataManager:
                 val_b = self.df.loc[r['receiver'], r['turn']]
                 self.df.loc[sender, r['turn']] = val_b
                 self.df.loc[r['receiver'], r['turn']] = val_a
+                # 휴가 시트 동기화
+                self.swap_vacation_data(sender, r['receiver'], r['turn'])
                 if self.sheet_connected:
                     ok1 = self.update_sheet_cell(sender, r['turn'], val_b)
                     ok2 = self.update_sheet_cell(r['receiver'], r['turn'], val_a)
@@ -1174,6 +1175,114 @@ class DataManager:
         except Exception as e:
             st.error(f"구글 시트 업데이트 실패 ({intern_name}): {e}")
             return False
+
+    def update_vacation_sheet_cell(self, intern_name, turn_key, new_value):
+        """휴가 시트의 특정 인턴·턴 셀을 업데이트한다."""
+        if not self.sheet_connected or self.vac_holiday_ws is None:
+            return False
+        try:
+            cell = self.vac_holiday_ws.find(intern_name)
+            row_idx = cell.row
+            all_rows = self.vac_holiday_ws.get_all_values()
+            header_row_num = turn_col_idx = None
+            for r_i, row in enumerate(all_rows):
+                for c_i, h in enumerate(row):
+                    if '성명' in h or '이름' in h:
+                        header_row_num = r_i + 1
+                        break
+                if header_row_num:
+                    for c_i, h in enumerate(all_rows[header_row_num - 1]):
+                        if h.strip() == turn_key.strip():
+                            turn_col_idx = c_i + 1
+                            break
+                    break
+            if turn_col_idx is None:
+                return False
+            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, new_value if new_value else "")
+            return True
+        except Exception as e:
+            print(f"휴가 시트 업데이트 실패 ({intern_name}): {e}")
+            return False
+
+    def swap_vacation_data(self, person1, person2, turn):
+        """
+        두 사람의 해당 턴 휴가 데이터를 교환한다.
+        둘 다 이 턴에 휴가가 있는 경우에만 동작 (vacation_data + 휴가 시트).
+        """
+        v1 = self.vacation_data.get(person1, {})
+        v2 = self.vacation_data.get(person2, {})
+
+        # 각 사람이 해당 turn에 가진 휴가 찾기
+        p1_period = p2_period = None
+        for period in ('1차', '2차'):
+            vi = v1.get(period)
+            if vi and vi.get('turn') == turn:
+                p1_period = period
+            vi = v2.get(period)
+            if vi and vi.get('turn') == turn:
+                p2_period = period
+
+        if not p1_period or not p2_period:
+            return  # 둘 다 휴가가 아니면 교환할 것 없음
+
+        # 타입 교환
+        p1_type = v1[p1_period]['type']
+        p2_type = v2[p2_period]['type']
+        v1[p1_period]['type'] = p2_type
+        v2[p2_period]['type'] = p1_type
+        self.save_db()
+
+        # 휴가 시트에도 반영 (셀 전체 값: "IM\nA-3" 형태)
+        if self.sheet_connected and self.vac_holiday_ws:
+            try:
+                # 현재 셀 값 읽기
+                cell1 = self._get_vacation_cell_value(person1, turn)
+                cell2 = self._get_vacation_cell_value(person2, turn)
+                if cell1 and cell2:
+                    # 타입 부분만 교환
+                    new_cell1 = self._replace_vac_type_in_cell(cell1, p1_type, p2_type)
+                    new_cell2 = self._replace_vac_type_in_cell(cell2, p2_type, p1_type)
+                    self.update_vacation_sheet_cell(person1, turn, new_cell1)
+                    self.update_vacation_sheet_cell(person2, turn, new_cell2)
+            except Exception as e:
+                print(f"휴가 시트 교환 반영 실패: {e}")
+
+    def _get_vacation_cell_value(self, intern_name, turn_key):
+        """휴가 시트에서 특정 인턴·턴의 셀 값을 읽는다."""
+        try:
+            cell = self.vac_holiday_ws.find(intern_name)
+            row_idx = cell.row
+            all_rows = self.vac_holiday_ws.get_all_values()
+            header_row_num = turn_col_idx = None
+            for r_i, row in enumerate(all_rows):
+                for c_i, h in enumerate(row):
+                    if '성명' in h or '이름' in h:
+                        header_row_num = r_i + 1
+                        break
+                if header_row_num:
+                    for c_i, h in enumerate(all_rows[header_row_num - 1]):
+                        if h.strip() == turn_key.strip():
+                            turn_col_idx = c_i
+                            break
+                    break
+            if turn_col_idx is None:
+                return None
+            return all_rows[row_idx - 1][turn_col_idx]
+        except Exception:
+            return None
+
+    @staticmethod
+    def _replace_vac_type_in_cell(cell_value, old_type, new_type):
+        """셀 값에서 휴가 타입만 교체. 'IM\\nA-3' → 'IM\\nB-4'"""
+        lines = cell_value.split('\n')
+        vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
+        result = []
+        for line in lines:
+            if vac_pattern.match(line.strip()):
+                result.append(new_type)
+            else:
+                result.append(line)
+        return '\n'.join(result)
 
     # ── DB 로드 / 저장 ─────────────────────────────────────────────────────────
     def load_db(self):
@@ -1559,6 +1668,8 @@ class DataManager:
             # 교환 실행
             self.df.loc[p1, turn] = val_b
             self.df.loc[p2, turn] = val_a
+            # 휴가 시트 동기화
+            self.swap_vacation_data(p1, p2, turn)
 
             sheet_ok = True
             if self.sheet_connected:
