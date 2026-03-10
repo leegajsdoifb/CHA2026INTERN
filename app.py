@@ -1796,31 +1796,64 @@ hr { margin-top: 0.5rem !important; margin-bottom: 0.5rem !important; }
 
 _MOBILE_CSS = """
 <style>
+/* 기본 글씨 크기 확대 */
+html, body, .main, .block-container, [data-testid="stAppViewContainer"] {
+    font-size: 1.05rem !important;
+}
+
 .block-container {
-    padding-left: 0.75rem !important;
-    padding-right: 0.75rem !important;
-    padding-top: 3.5rem !important;
+    padding-left: 0.5rem !important;
+    padding-right: 0.5rem !important;
+    padding-top: 3rem !important;
     max-width: 100% !important;
 }
 [data-testid="column"] { padding: 0 2px !important; }
+
+/* 버튼 */
 .stButton > button {
-    min-height: 2.5rem;
-    font-size: 0.9rem;
+    min-height: 2.8rem;
+    font-size: 1.05rem;
     border-radius: 6px;
     transition: all 0.15s;
 }
-.stSelectbox label, .stTextInput label { font-size: 0.85rem !important; }
-.stDataFrame { font-size: 0.75rem; }
-.stAlert { border-radius: 8px !important; }
+
+/* 선택박스·입력 */
+.stSelectbox label, .stTextInput label { font-size: 1.05rem !important; }
+.stSelectbox [data-baseweb="select"] { font-size: 1rem !important; }
+
+/* 표 — 모바일 가독성 확보 */
+.stDataFrame { font-size: 0.88rem; }
+.stDataFrame table { font-size: 0.88rem !important; }
+.stDataFrame th, .stDataFrame td {
+    padding: 4px 6px !important;
+    font-size: 0.88rem !important;
+}
+
+/* 알림/경고 텍스트 */
+.stAlert { border-radius: 8px !important; font-size: 1rem !important; }
+.stAlert p { font-size: 1rem !important; }
+
+/* 마크다운 본문 */
+.stMarkdown, .stMarkdown p { font-size: 1rem !important; }
+
+/* 접기 메뉴 */
 .stExpander {
     border: 1px solid #e0e0e0;
     border-radius: 8px;
     margin-bottom: 0.4rem;
 }
+.stExpander summary { font-size: 1rem !important; }
+
+/* 구분선 */
 hr { margin-top: 0.4rem !important; margin-bottom: 0.4rem !important; }
-h1 { font-size: 1.5rem !important; }
-h2 { font-size: 1.2rem !important; }
-h3 { font-size: 1.1rem !important; }
+
+/* 제목 */
+h1 { font-size: 1.6rem !important; }
+h2 { font-size: 1.3rem !important; }
+h3 { font-size: 1.15rem !important; }
+
+/* 캡션 텍스트 */
+.stCaption, small { font-size: 0.9rem !important; }
 </style>
 """
 
