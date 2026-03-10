@@ -1286,11 +1286,15 @@ class DataManager:
 
     # ── DB 로드 / 저장 ─────────────────────────────────────────────────────────
     def load_db(self):
+        # 시트 연결이 끊어졌거나 휴가 시트가 없으면 재연결 시도
+        if not self.sheet_connected or self.vac_holiday_ws is None:
+            self.connect_google_sheet()
+
         sheet_df          = self.fetch_data_from_sheet()
         self.passwords    = self.fetch_passwords_from_sheet()
         self.market_posts = self.fetch_market_posts()
 
-        # 휴가 데이터: 시트에서 먼저 시도, 실패 시 로컬 JSON 폴백
+        # 휴가 데이터: 시트에서 항상 새로 가져옴
         sheet_vac = self.fetch_vacation_data_from_sheets()
 
         if not sheet_df.empty:
