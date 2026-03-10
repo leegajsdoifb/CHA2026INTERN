@@ -2371,7 +2371,7 @@ with st.sidebar:
         del st.session_state.user_id
         st.rerun()
     _sb_mobile = st.session_state.layout_mode == 'mobile'
-    if col_mode.button("💻 PC 버전으로 전환" if _sb_mobile else "📱 모바일 버전으로 전환",
+    if col_mode.button("💻 PC" if _sb_mobile else "📱 모바일",
                        use_container_width=True, key="sb_mode_toggle"):
         st.session_state.layout_mode = 'pc' if _sb_mobile else 'mobile'
         st.rerun()
