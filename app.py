@@ -1933,7 +1933,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-if 'manager' not in st.session_state:
+if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'log_login'):
     st.session_state.manager = DataManager()
 mgr = st.session_state.manager
 
