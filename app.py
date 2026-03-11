@@ -4,7 +4,7 @@ import pandas as pd
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
@@ -33,6 +33,14 @@ HISTORY_HEADER = ['날짜시간', '신청자', '상대방', '교환턴',
                   '신청자값', '상대방값', '결과', '비고']
 MARKET_HEADER  = ['등록ID', '등록시각', '등록자', '주고싶은턴',
                   '주고싶은값', '받고싶은과', '메시지', '상태']
+LOGIN_LOG_SHEET = '로그인이력'
+LOGIN_LOG_HEADER = ['시각', '이름', '결과', '사유']
+
+KST = timezone(timedelta(hours=9))
+
+def now_kst():
+    """한국 시간(KST) 기준 현재 시각"""
+    return datetime.now(KST)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -111,6 +119,19 @@ class DataManager:
             if self.market_ws:
                 self._ensure_header(self.market_ws, MARKET_HEADER)
 
+            # 로그인이력 탭 (없으면 생성)
+            try:
+                self.login_log_ws = self.sh.worksheet(LOGIN_LOG_SHEET)
+            except gspread.WorksheetNotFound:
+                try:
+                    self.login_log_ws = self.sh.add_worksheet(
+                        title=LOGIN_LOG_SHEET, rows=1000, cols=len(LOGIN_LOG_HEADER)
+                    )
+                except Exception:
+                    self.login_log_ws = None
+            if self.login_log_ws:
+                self._ensure_header(self.login_log_ws, LOGIN_LOG_HEADER)
+
             self.sheet_connected = True
             print("구글 시트 연결 성공")
 
@@ -126,6 +147,34 @@ class DataManager:
                 ws.update('A1', [header])
         except Exception as e:
             print(f"헤더 초기화 실패: {e}")
+
+    # ── 로그인 이력 ─────────────────────────────────────────────────────────────
+    def log_login(self, name, result, reason=''):
+        """로그인 시도를 시트에 기록한다."""
+        if not self.sheet_connected or not hasattr(self, 'login_log_ws') or self.login_log_ws is None:
+            return
+        try:
+            now = now_kst().strftime("%Y-%m-%d %H:%M:%S")
+            self.login_log_ws.append_row([now, name, result, reason],
+                                         value_input_option='USER_ENTERED')
+        except Exception as e:
+            print(f"로그인 이력 기록 실패: {e}")
+
+    def fetch_login_logs(self, limit=100):
+        """최근 로그인 이력을 가져온다."""
+        if not self.sheet_connected or not hasattr(self, 'login_log_ws') or self.login_log_ws is None:
+            return []
+        try:
+            rows = self.login_log_ws.get_all_values()
+            if len(rows) < 2:
+                return []
+            header = rows[0]
+            data = rows[1:]
+            # 최신순 정렬 (역순)
+            data.reverse()
+            return [dict(zip(header, row)) for row in data[:limit]]
+        except Exception:
+            return []
 
     # ── 비밀번호 ───────────────────────────────────────────────────────────────
     def fetch_passwords_from_sheet(self):
@@ -187,7 +236,7 @@ class DataManager:
         if not self.sheet_connected or self.history_ws is None:
             return
         try:
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = now_kst().strftime("%Y-%m-%d %H:%M:%S")
             self.history_ws.append_row(
                 [now, sender, receiver, turn,
                  val_sender or '', val_receiver or '', result, note],
@@ -327,8 +376,8 @@ class DataManager:
             turn_label = give_turn if give_turn != '아무턴' else '(아무 턴)'
             return False, f"이미 {turn_label}으로 등록된 활성 게시물이 있습니다. 기존 게시물을 먼저 취소해 주세요."
         try:
-            post_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
-            now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            post_id = now_kst().strftime("%Y%m%d%H%M%S%f")[:17]
+            now     = now_kst().strftime("%Y-%m-%d %H:%M:%S")
             self.market_ws.append_row(
                 [post_id, now, name, give_turn, give_val, want_dept, message, '활성'],
                 value_input_option='USER_ENTERED'
@@ -773,7 +822,7 @@ class DataManager:
         모든 상대방이 수락해야만 일괄 실행.
         messages: {receiver: msg} 상대방별 개별 메시지 (있으면 message보다 우선)
         """
-        chain_id = datetime.now().strftime("%Y%m%d%H%M%S%f")[:17]
+        chain_id = now_kst().strftime("%Y%m%d%H%M%S%f")[:17]
         created_reqs = []
 
         for s in swaps:
@@ -797,7 +846,7 @@ class DataManager:
                     return False, f"{turn} → {receiver}: 이미 대기 중인 요청이 있습니다."
 
             created_reqs.append({
-                "id":           datetime.now().strftime("%Y%m%d%H%M%S%f")[:17] + str(len(created_reqs)),
+                "id":           now_kst().strftime("%Y%m%d%H%M%S%f")[:17] + str(len(created_reqs)),
                 "chain_id":     chain_id,
                 "sender":       sender,
                 "receiver":     receiver,
@@ -805,7 +854,7 @@ class DataManager:
                 "val_sender":   val_a,
                 "val_receiver": val_b,
                 "status":       "pending",
-                "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
                 "message":      (messages or {}).get(receiver, message)
             })
 
@@ -1640,14 +1689,14 @@ class DataManager:
             return False, "\n".join(lines)
 
         new_req = {
-            "id":           datetime.now().strftime("%Y%m%d%H%M%S%f")[:17],
+            "id":           now_kst().strftime("%Y%m%d%H%M%S%f")[:17],
             "sender":       sender,
             "receiver":     receiver,
             "turn":         turn,
             "val_sender":   val_a,
             "val_receiver": val_b,
             "status":       "pending",
-            "timestamp":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp":    now_kst().strftime("%Y-%m-%d %H:%M:%S"),
             "message":      message
         }
         self.requests.append(new_req)
@@ -1939,19 +1988,24 @@ if 'user_id' not in st.session_state:
             if input_id == 'ADMIN':
                 admin_pw = str(mgr.passwords.get('ADMIN', '1234')).strip()
                 if input_pw == admin_pw:
+                    mgr.log_login('ADMIN', '성공')
                     st.session_state.user_id = 'ADMIN'
                     st.rerun()
                 else:
+                    mgr.log_login('ADMIN', '실패', '비밀번호 오류')
                     st.error("관리자 비밀번호가 틀렸습니다.")
             elif input_id in mgr.df.index:
                 if mgr.check_password(input_id, input_pw):
+                    mgr.log_login(input_id, '성공')
                     st.session_state.user_id = input_id
                     if input_pw == '1234':
                         st.session_state.force_pw_change = True
                     st.rerun()
                 else:
+                    mgr.log_login(input_id, '실패', '비밀번호 오류')
                     st.error("비밀번호가 틀렸습니다.")
             else:
+                mgr.log_login(input_id, '실패', '명단에 없는 이름')
                 st.error("명단에 없는 이름입니다.")
     st.stop()
 
@@ -1975,8 +2029,8 @@ if user == 'ADMIN':
     st.title("🔐 관리자 대시보드")
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
-    adm_tab1, adm_tab2, adm_tab6, adm_tab3, adm_tab4, adm_tab5 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리"
+    adm_tab1, adm_tab2, adm_tab6, adm_tab3, adm_tab4, adm_tab5, adm_tab7 = st.tabs([
+        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -2379,6 +2433,40 @@ if user == 'ADMIN':
             st.dataframe(vac_df, use_container_width=True, hide_index=True,
                          height=min(80 + len(vac_df) * 35, 600))
             st.caption(f"표시: {len(vac_df)}명")
+
+    # ── 관리자 탭7: 로그인 이력 ────────────────────────────────────────────────
+    with adm_tab7:
+        st.subheader("🔐 로그인 이력")
+        st.caption("최근 로그인 시도 내역을 확인할 수 있습니다.")
+
+        login_logs = mgr.fetch_login_logs(limit=200)
+        if not login_logs:
+            st.info("로그인 이력이 없습니다.")
+        else:
+            log_df = pd.DataFrame(login_logs)
+
+            # 필터
+            f1, f2 = st.columns(2)
+            result_filter = f1.selectbox("결과 필터", ["전체", "성공", "실패"], key="adm_login_filter")
+            name_filter = f2.text_input("이름 검색", key="adm_login_name", placeholder="이름 입력")
+
+            filtered = log_df.copy()
+            if result_filter != "전체":
+                filtered = filtered[filtered.get('결과', pd.Series()) == result_filter]
+            if name_filter.strip():
+                filtered = filtered[filtered.get('이름', pd.Series()).str.contains(name_filter.strip(), na=False)]
+
+            # 요약 메트릭
+            m1, m2, m3 = st.columns(3)
+            total_logs = len(log_df)
+            success_count = len(log_df[log_df.get('결과', pd.Series()) == '성공'])
+            fail_count = len(log_df[log_df.get('결과', pd.Series()) == '실패'])
+            m1.metric("전체 시도", total_logs)
+            m2.metric("성공", success_count)
+            m3.metric("실패", fail_count)
+
+            st.dataframe(filtered, use_container_width=True, hide_index=True,
+                         height=min(80 + len(filtered) * 35, 500))
 
     st.stop()
 
@@ -2922,8 +3010,11 @@ for i, item in enumerate(st.session_state.exchange_items):
     lbl = f"상대방 {num_label}" if len(st.session_state.exchange_items) > 1 else "상대방"
     c1, c2, c4 = st.columns([2, 1.5, 0.5])
     with c1:
-        sel_t = st.selectbox(lbl, others,
-                             index=others.index(t_default), key=f'ei_t_{iid}')
+        _ei_t_key = f'ei_t_{iid}'
+        _ei_t_kwargs = {"key": _ei_t_key}
+        if _ei_t_key not in st.session_state:
+            _ei_t_kwargs["index"] = others.index(t_default)
+        sel_t = st.selectbox(lbl, others, **_ei_t_kwargs)
     with c2:
         # 턴 선택 시 휴가 표시
         _u_vt = mgr.get_vacation_turns(user)
@@ -2935,10 +3026,12 @@ for i, item in enumerate(st.session_state.exchange_items):
             if _t in _t_vt: _marks.append(f"{sel_t}{_t_vt[_t]}")
             _turn_labels_ei.append(f"{_t} {'  '.join(_marks)}" if _marks else _t)
         sel_turn_idx = avail_turns.index(turn_default)
-        _sel_turn_idx = st.selectbox("턴", range(len(avail_turns)),
-                                     index=sel_turn_idx,
-                                     format_func=lambda idx, _lb=_turn_labels_ei: _lb[idx],
-                                     key=f'ei_turn_{iid}')
+        _ei_turn_key = f'ei_turn_{iid}'
+        _ei_turn_kwargs = {"key": _ei_turn_key,
+                           "format_func": lambda idx, _lb=_turn_labels_ei: _lb[idx]}
+        if _ei_turn_key not in st.session_state:
+            _ei_turn_kwargs["index"] = sel_turn_idx
+        _sel_turn_idx = st.selectbox("턴", range(len(avail_turns)), **_ei_turn_kwargs)
         sel_turn = avail_turns[_sel_turn_idx]
     st.session_state.exchange_items[i]['target'] = sel_t
     st.session_state.exchange_items[i]['turn']   = sel_turn
