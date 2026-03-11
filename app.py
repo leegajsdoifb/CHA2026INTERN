@@ -144,8 +144,8 @@ class DataManager:
             for row in rows[1:]:
                 if len(row) <= max(name_col, pw_col):
                     continue
-                name = row[name_col].strip()
-                pw   = row[pw_col].strip()
+                name = str(row[name_col]).strip()
+                pw   = str(row[pw_col]).strip()
                 if name:
                     result[name] = pw if pw else '1234'
             return result
@@ -154,12 +154,14 @@ class DataManager:
             return {}
 
     def check_password(self, name, password):
-        return password == self.passwords.get(name, '1234')
+        stored = self.passwords.get(name, '1234')
+        return password.strip() == str(stored).strip()
 
     def update_password_in_sheet(self, name, new_password):
         if not self.sheet_connected or self.passwd_ws is None:
             return False, "비밀번호 시트에 접근할 수 없습니다."
         try:
+            new_password = str(new_password).strip()
             rows     = self.passwd_ws.get_all_values()
             header   = [h.strip() for h in rows[0]]
             name_col = next((i for i, h in enumerate(header) if '이름' in h or '성명' in h), None)
@@ -168,6 +170,10 @@ class DataManager:
                 return False, "비밀번호 시트 컬럼 오류"
             for row_i, row in enumerate(rows[1:], start=2):
                 if len(row) > name_col and row[name_col].strip() == name:
+                    # 셀을 텍스트 서식으로 설정하여 숫자 자동변환 방지
+                    from gspread.utils import rowcol_to_a1
+                    cell_label = rowcol_to_a1(row_i, pw_col + 1)
+                    self.passwd_ws.format(cell_label, {"numberFormat": {"type": "TEXT"}})
                     self.passwd_ws.update_cell(row_i, pw_col + 1, new_password)
                     self.passwords[name] = new_password
                     return True, "비밀번호가 변경되었습니다."
@@ -1925,8 +1931,13 @@ if 'user_id' not in st.session_state:
         input_pw = st.text_input("비밀번호 (기본: 1234)", type="password")
         if st.button("로그인", type="primary"):
             input_id = input_id.strip()
+            input_pw = input_pw.strip()
+            # 로그인 시 최신 비밀번호를 시트에서 다시 불러오기
+            fresh_pw = mgr.fetch_passwords_from_sheet()
+            if fresh_pw:
+                mgr.passwords = fresh_pw
             if input_id == 'ADMIN':
-                admin_pw = mgr.passwords.get('ADMIN', '1234')
+                admin_pw = str(mgr.passwords.get('ADMIN', '1234')).strip()
                 if input_pw == admin_pw:
                     st.session_state.user_id = 'ADMIN'
                     st.rerun()
