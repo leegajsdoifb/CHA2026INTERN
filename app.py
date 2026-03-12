@@ -2500,36 +2500,7 @@ if st.session_state.get('force_pw_change'):
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
 
-    # ── 빠른 요청 확인 (인라인) ─────────────────────────────────────────────
-    if st.session_state.quick_confirm is not None:
-        qc = st.session_state.quick_confirm
-        st.markdown("### ⚡ 교환 요청 확인")
-        _qc_tlbl = mgr.turn_label(user, qc['turn'])
-        st.info(
-            f"**{_qc_tlbl}** 턴\n\n"
-            f"나: `{qc['my_val']}` ↔ **{qc['receiver']}**: `{qc['partner_val']}`"
-        )
-        qc_message = st.text_input(
-            "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
-            key="qc_inline_msg", max_chars=100
-        )
-        qc_c1, qc_c2 = st.columns(2)
-        if qc_c1.button("✅ 요청 보내기", key="qc_inline_yes",
-                        type="primary", use_container_width=True):
-            with st.spinner("최신 데이터 확인 중..."):
-                mgr.load_db()
-            succ, result_msg = mgr.add_request(
-                user, qc['receiver'], qc['turn'], message=qc_message)
-            st.session_state.quick_confirm = None
-            if succ:
-                st.success(result_msg)
-            else:
-                st.error(result_msg)
-            st.rerun()
-        if qc_c2.button("❌ 취소", key="qc_inline_no", use_container_width=True):
-            st.session_state.quick_confirm = None
-            st.rerun()
-        st.divider()
+    # (빠른 요청 확인은 아래 @st.dialog 로 처리)
 
     # ── 이름 + 필수과목 현황 + 과목 통계 (compact) ───────────────────────────
     valid_sb, missing_sb = mgr.validate_intern(user)
@@ -2936,6 +2907,39 @@ st.title("🏥 차병원 인턴 턴표 교환소")
 
 
 
+
+# ── 빠른 요청 컨펌 팝업 다이얼로그 (시뮬레이션·장터에서 "요청" 클릭 시) ────
+@st.dialog("⚡ 교환 요청 확인")
+def quick_confirm_dialog():
+    qc = st.session_state.quick_confirm
+    _qc_tlbl = mgr.turn_label(user, qc['turn'])
+    st.info(
+        f"**{_qc_tlbl}** 턴\n\n"
+        f"나: `{qc['my_val']}` ↔ **{qc['receiver']}**: `{qc['partner_val']}`"
+    )
+    qc_message = st.text_input(
+        "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
+        key="qc_dlg_msg", max_chars=100
+    )
+    qc_c1, qc_c2 = st.columns(2)
+    if qc_c1.button("✅ 요청 보내기", key="qc_dlg_yes",
+                    type="primary", use_container_width=True):
+        with st.spinner("최신 데이터 확인 중..."):
+            mgr.load_db()
+        succ, result_msg = mgr.add_request(
+            user, qc['receiver'], qc['turn'], message=qc_message)
+        st.session_state.quick_confirm = None
+        if succ:
+            st.success(result_msg)
+        else:
+            st.error(result_msg)
+        st.rerun()
+    if qc_c2.button("❌ 취소", key="qc_dlg_no", use_container_width=True):
+        st.session_state.quick_confirm = None
+        st.rerun()
+
+if st.session_state.quick_confirm is not None:
+    quick_confirm_dialog()
 
 # ── 복합 교환 요청 컨펌 팝업 다이얼로그 ─────────────────────────────────────
 @st.dialog("📤 복합 교환 요청 확인")
