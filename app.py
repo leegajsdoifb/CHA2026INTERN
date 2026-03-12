@@ -114,7 +114,8 @@ class DataManager:
                     self.market_ws = self.sh.add_worksheet(
                         title=MARKET_SHEET_NAME, rows=500, cols=len(MARKET_HEADER)
                     )
-                except Exception:
+                except Exception as e:
+                    print(f"[ERROR] market_ws init failed: {e}")
                     self.market_ws = None
             if self.market_ws:
                 self._ensure_header(self.market_ws, MARKET_HEADER)
@@ -127,7 +128,8 @@ class DataManager:
                     self.login_log_ws = self.sh.add_worksheet(
                         title=LOGIN_LOG_SHEET, rows=1000, cols=len(LOGIN_LOG_HEADER)
                     )
-                except Exception:
+                except Exception as e:
+                    print(f"[ERROR] login_log_ws creation failed: {e}")
                     self.login_log_ws = None
             if self.login_log_ws:
                 self._ensure_header(self.login_log_ws, LOGIN_LOG_HEADER)
@@ -173,7 +175,8 @@ class DataManager:
             # 최신순 정렬 (역순)
             data.reverse()
             return [dict(zip(header, row)) for row in data[:limit]]
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] get_login_logs failed: {e}")
             return []
 
     # ── 비밀번호 ───────────────────────────────────────────────────────────────
@@ -251,7 +254,8 @@ class DataManager:
             return []
         try:
             return self.history_ws.get_all_values()
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] fetch_history_data failed: {e}")
             return []
 
     # ── 휴가 데이터 (시트에서 로드) ──────────────────────────────────────────
@@ -1323,7 +1327,8 @@ class DataManager:
             if turn_col_idx is None:
                 return None
             return all_rows[row_idx - 1][turn_col_idx]
-        except Exception:
+        except Exception as e:
+            print(f"[ERROR] _get_vac_cell failed: {e}")
             return None
 
     @staticmethod
@@ -1360,7 +1365,8 @@ class DataManager:
                         db = json.load(f)
                         self.requests     = db.get('requests', [])
                         self.vacation_data = sheet_vac if sheet_vac else db.get('vacation_data', {})
-                except Exception:
+                except Exception as e:
+                    print(f"[ERROR] DB_FILE load failed: {e}")
                     self.requests     = []
                     self.vacation_data = sheet_vac if sheet_vac else {}
             else:
@@ -2020,7 +2026,7 @@ if user == 'ADMIN':
         st.caption("ADMIN 계정으로 로그인됨")
         st.divider()
         if st.button("🚪 로그아웃", use_container_width=True):
-            del st.session_state['user_id']
+            st.session_state.pop('user_id', None)
             st.rerun()
         if st.button("🔄 데이터 새로고침", use_container_width=True):
             st.session_state.manager = DataManager()
@@ -2555,7 +2561,7 @@ with st.sidebar:
         mgr.load_db()
         st.rerun()
     if col_lo.button("🚪 로그아웃", use_container_width=True):
-        del st.session_state.user_id
+        st.session_state.pop('user_id', None)
         st.rerun()
     _sb_mobile = st.session_state.layout_mode == 'mobile'
     if col_mode.button("💻 PC" if _sb_mobile else "📱 모바일",
@@ -2586,11 +2592,13 @@ with st.sidebar:
             else:
                 # 일반 요청
                 for req in inbox_normal:
-                    snd_v = mgr.df.loc[req['sender'], req['turn']] if req['sender'] in mgr.df.index else '?'
-                    my_v  = mgr.df.loc[user, req['turn']]          if user          in mgr.df.index else '?'
-                    _req_tlbl = mgr.turn_label(user, req['turn'])
-                    st.write(f"**{req['sender']}** | {_req_tlbl}")
-                    st.caption(f"상대: `{snd_v}` ↔ 나: `{my_v}`  _{req['timestamp'][:10]}_")
+                    _rt = req.get('turn', '')
+                    _rt_in_df = _rt in mgr.df.columns
+                    snd_v = mgr.df.loc[req['sender'], _rt] if req.get('sender') in mgr.df.index and _rt_in_df else '?'
+                    my_v  = mgr.df.loc[user, _rt]          if user in mgr.df.index and _rt_in_df else '?'
+                    _req_tlbl = mgr.turn_label(user, _rt)
+                    st.write(f"**{req.get('sender', '?')}** | {_req_tlbl}")
+                    st.caption(f"상대: `{snd_v}` ↔ 나: `{my_v}`  _{req.get('timestamp', '')[:10]}_")
                     if req.get('message'):
                         st.info(f"💬 {req['message']}")
                     ca, cb = st.columns(2)
@@ -2616,9 +2624,11 @@ with st.sidebar:
                     accepted = sum(1 for r in chain_all if r['status'] == 'chain_accepted')
                     st.caption(f"체인 {total}건 중 {accepted}건 수락됨 | 모두 수락 시 일괄 실행")
                     for req in reqs:
-                        snd_v = mgr.df.loc[req['sender'], req['turn']] if req['sender'] in mgr.df.index else '?'
-                        my_v  = mgr.df.loc[user, req['turn']]          if user          in mgr.df.index else '?'
-                        _ch_tlbl = mgr.turn_label(user, req['turn'])
+                        _crt = req.get('turn', '')
+                        _crt_ok = _crt in mgr.df.columns
+                        snd_v = mgr.df.loc[req['sender'], _crt] if req.get('sender') in mgr.df.index and _crt_ok else '?'
+                        my_v  = mgr.df.loc[user, _crt]          if user in mgr.df.index and _crt_ok else '?'
+                        _ch_tlbl = mgr.turn_label(user, _crt)
                         st.write(f"  • **{_ch_tlbl}**: `{snd_v}` ↔ 나: `{my_v}`")
                         if req.get('message'):
                             st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;💬 {req['message']}")
@@ -2912,10 +2922,14 @@ st.title("🏥 차병원 인턴 턴표 교환소")
 @st.dialog("⚡ 교환 요청 확인")
 def quick_confirm_dialog():
     qc = st.session_state.quick_confirm
-    _qc_tlbl = mgr.turn_label(user, qc['turn'])
+    if not qc or not isinstance(qc, dict):
+        st.session_state.quick_confirm = None
+        st.rerun()
+        return
+    _qc_tlbl = mgr.turn_label(user, qc.get('turn', ''))
     st.info(
         f"**{_qc_tlbl}** 턴\n\n"
-        f"나: `{qc['my_val']}` ↔ **{qc['receiver']}**: `{qc['partner_val']}`"
+        f"나: `{qc.get('my_val', '?')}` ↔ **{qc.get('receiver', '?')}**: `{qc.get('partner_val', '?')}`"
     )
     qc_message = st.text_input(
         "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
@@ -2927,7 +2941,7 @@ def quick_confirm_dialog():
         with st.spinner("최신 데이터 확인 중..."):
             mgr.load_db()
         succ, result_msg = mgr.add_request(
-            user, qc['receiver'], qc['turn'], message=qc_message)
+            user, qc.get('receiver', ''), qc.get('turn', ''), message=qc_message)
         st.session_state.quick_confirm = None
         if succ:
             st.success(result_msg)
@@ -2942,6 +2956,10 @@ def quick_confirm_dialog():
 @st.dialog("📤 복합 교환 요청 확인")
 def multi_confirm_dialog():
     items = st.session_state.multi_confirm
+    if not items or not isinstance(items, list):
+        st.session_state.multi_confirm = None
+        st.rerun()
+        return
     st.write(f"다음 교환 **{len(items)}건**을 신청합니다:")
     # 각 항목 표시 + 상대방별 메시지 입력
     mc_messages = {}
@@ -2992,6 +3010,10 @@ st.subheader("📤 교환 신청")
 avail_turns = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
 others = [u for u in mgr.df.index if u != user]
 
+if not others or not avail_turns:
+    st.info("교환 가능한 상대방 또는 턴이 없습니다.")
+    st.stop()
+
 # 항목이 없으면 기본값 1개 추가
 if not st.session_state.exchange_items and others and avail_turns:
     st.session_state.exchange_items.append({
@@ -3016,7 +3038,7 @@ for i, item in enumerate(st.session_state.exchange_items):
     with c1:
         _ei_t_key = f'ei_t_{iid}'
         _ei_t_kwargs = {"key": _ei_t_key}
-        if _ei_t_key not in st.session_state:
+        if _ei_t_key not in st.session_state and t_default in others:
             _ei_t_kwargs["index"] = others.index(t_default)
         sel_t = st.selectbox(lbl, others, **_ei_t_kwargs)
     with c2:
@@ -3029,7 +3051,7 @@ for i, item in enumerate(st.session_state.exchange_items):
             if _t in _u_vt: _marks.append(f"나{_u_vt[_t]}")
             if _t in _t_vt: _marks.append(f"{sel_t}{_t_vt[_t]}")
             _turn_labels_ei.append(f"{_t} {'  '.join(_marks)}" if _marks else _t)
-        sel_turn_idx = avail_turns.index(turn_default)
+        sel_turn_idx = avail_turns.index(turn_default) if turn_default in avail_turns else 0
         _ei_turn_key = f'ei_turn_{iid}'
         _ei_turn_kwargs = {"key": _ei_turn_key,
                            "format_func": lambda idx, _lb=_turn_labels_ei: _lb[idx]}
@@ -3039,8 +3061,9 @@ for i, item in enumerate(st.session_state.exchange_items):
         sel_turn = avail_turns[_sel_turn_idx]
     st.session_state.exchange_items[i]['target'] = sel_t
     st.session_state.exchange_items[i]['turn']   = sel_turn
-    my_v = mgr.df.loc[user,   sel_turn] if user   in mgr.df.index else '?'
-    pt_v = mgr.df.loc[sel_t,  sel_turn] if sel_t  in mgr.df.index else '?'
+    _st_ok = sel_turn in mgr.df.columns
+    my_v = mgr.df.loc[user,   sel_turn] if user  in mgr.df.index and _st_ok else '?'
+    pt_v = mgr.df.loc[sel_t,  sel_turn] if sel_t in mgr.df.index and _st_ok else '?'
     # 상대방 휴가턴 정보
     _ei_partner_vac = mgr.get_intern_vacation(sel_t) if sel_t else {}
     _ei_pvac_parts = []
@@ -3346,7 +3369,7 @@ with tab_browse:
                                         st.session_state.multi_confirm = confirm_items
                                         st.rerun()
                             if st.button("✕ 닫기", key=f"mktcc_{mkt_key}"):
-                                del st.session_state.mkt_combos[mkt_key]
+                                st.session_state.mkt_combos.pop(mkt_key, None)
                                 st.rerun()
 
 # ── 장터: 내 턴 올리기 ──────────────────────────────────────────────────────
