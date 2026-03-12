@@ -2938,9 +2938,6 @@ def quick_confirm_dialog():
         st.session_state.quick_confirm = None
         st.rerun()
 
-if st.session_state.quick_confirm is not None:
-    quick_confirm_dialog()
-
 # ── 복합 교환 요청 컨펌 팝업 다이얼로그 ─────────────────────────────────────
 @st.dialog("📤 복합 교환 요청 확인")
 def multi_confirm_dialog():
@@ -2982,7 +2979,10 @@ def multi_confirm_dialog():
         st.session_state.multi_confirm = None
         st.rerun()
 
-if st.session_state.multi_confirm is not None:
+# 다이얼로그는 한 번에 하나만 열 수 있으므로 우선순위로 분기
+if st.session_state.quick_confirm is not None:
+    quick_confirm_dialog()
+elif st.session_state.multi_confirm is not None:
     multi_confirm_dialog()
 
 # ──────────────────────────────────────────────────────────────────────────────
