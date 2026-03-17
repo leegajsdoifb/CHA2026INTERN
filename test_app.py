@@ -1571,6 +1571,57 @@ class TestAdminExchangeLimit(unittest.TestCase):
         self.assertIn('제한', msg)
 
 
+    def test_receiver_over_limit_blocked_at_request(self):
+        """신청 시 receiver의 교환 기회가 없으면 차단."""
+        dm = make_dm()
+        dm.admin_settings['exchange_limit_enabled'] = True
+        dm.admin_settings['exchange_limit_count'] = 1
+        # B가 이미 1건 수락
+        dm.requests = [{'id': 'old', 'sender': 'C', 'receiver': 'B', 'turn': '4턴',
+                        'val_sender': 'PE', 'val_receiver': 'ANE', 'status': 'accepted',
+                        'timestamp': '2026-01-01', 'message': ''}]
+        ok, msg = dm.add_request('A', 'B', '3턴')
+        self.assertFalse(ok)
+        self.assertIn('기회', msg)
+
+    def test_auto_reject_pending_on_accept(self):
+        """교환 수락 시 한도 도달한 인턴의 다른 pending 요청이 자동 거절."""
+        dm = make_dm()
+        dm.admin_settings['exchange_limit_enabled'] = True
+        dm.admin_settings['exchange_limit_count'] = 1
+        dm.requests = [
+            {'id': 'req1', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
+             'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'pending',
+             'timestamp': '2026-01-01', 'message': ''},
+            {'id': 'req2', 'sender': 'A', 'receiver': 'C', 'turn': '5턴',
+             'val_sender': 'GS', 'val_receiver': 'PE', 'status': 'pending',
+             'timestamp': '2026-01-01', 'message': ''},
+        ]
+        ok, msg = dm.process_request('req1', 'accept')
+        self.assertTrue(ok)
+        # req2는 A의 기회 소진으로 자동 거절
+        req2 = next(r for r in dm.requests if r['id'] == 'req2')
+        self.assertEqual(req2['status'], 'rejected')
+
+    def test_auto_reject_does_not_touch_other_interns(self):
+        """자동 거절 시 관련 없는 인턴의 요청은 영향 없음."""
+        dm = make_dm()
+        dm.admin_settings['exchange_limit_enabled'] = True
+        dm.admin_settings['exchange_limit_count'] = 1
+        dm.requests = [
+            {'id': 'req1', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
+             'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'pending',
+             'timestamp': '2026-01-01', 'message': ''},
+            {'id': 'req3', 'sender': 'C', 'receiver': 'D', 'turn': '5턴',
+             'val_sender': 'PE', 'val_receiver': 'ANE', 'status': 'pending',
+             'timestamp': '2026-01-01', 'message': ''},
+        ]
+        dm.process_request('req1', 'accept')
+        # C↔D 요청은 영향 없음
+        req3 = next(r for r in dm.requests if r['id'] == 'req3')
+        self.assertEqual(req3['status'], 'pending')
+
+
 class TestAdminBlockJinroSontaek(unittest.TestCase):
     """진로선택 교환 차단 테스트."""
 
