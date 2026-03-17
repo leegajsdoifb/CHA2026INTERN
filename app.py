@@ -61,6 +61,11 @@ class DataManager:
         self.passwords   = {}
         self.market_posts = []
         self.vacation_data = {}   # {이름: {'1차': {'turn':X,'type':Y}, '2차': {'turn':X,'type':Y}}}
+        self.admin_settings = {
+            'exchange_limit_enabled': False,   # 인당 교환 횟수 제한 ON/OFF
+            'exchange_limit_count': 1,         # 인당 최대 교환 횟수
+            'block_jinro_sontaek': False,      # 진로선택 교환 불가 ON/OFF
+        }
         self.connect_google_sheet()
         self.load_db()
 
@@ -825,6 +830,12 @@ class DataManager:
         chain_id = now_kst().strftime("%Y%m%d%H%M%S%f")[:17]
         created_reqs = []
 
+        # ── 관리자 설정: 인당 교환 횟수 제한 ──
+        if self.admin_settings.get('exchange_limit_enabled'):
+            limit = self.admin_settings.get('exchange_limit_count', 1)
+            if self.count_accepted_exchanges(sender) >= limit:
+                return False, f"⛔ 교환 횟수 제한({limit}회)을 초과했습니다."
+
         for s in swaps:
             receiver = s['receiver']
             turn = s['turn']
@@ -838,6 +849,13 @@ class DataManager:
             val_b = self.df.loc[receiver, turn]
             if val_a == val_b:
                 return False, f"{turn}: 이미 동일한 스케줄입니다."
+
+            # ── 관리자 설정: 진로선택 교환 불가 ──
+            if self.admin_settings.get('block_jinro_sontaek'):
+                loc_a, dept_a = self.parse_cell(val_a)
+                loc_b, dept_b = self.parse_cell(val_b)
+                if dept_a == '진로선택' or dept_b == '진로선택':
+                    return False, f"⛔ {turn}: 진로선택은 교환이 불가능합니다."
 
             # 중복 체크
             for req in self.requests:
@@ -1360,6 +1378,8 @@ class DataManager:
                         db = json.load(f)
                         self.requests     = db.get('requests', [])
                         self.vacation_data = sheet_vac if sheet_vac else db.get('vacation_data', {})
+                        saved_settings = db.get('admin_settings', {})
+                        self.admin_settings.update(saved_settings)
                 except Exception:
                     self.requests     = []
                     self.vacation_data = sheet_vac if sheet_vac else {}
@@ -1373,6 +1393,8 @@ class DataManager:
                     self.df            = pd.DataFrame(db.get('schedule', {}))
                     self.requests      = db.get('requests', [])
                     self.vacation_data = sheet_vac if sheet_vac else db.get('vacation_data', {})
+                    saved_settings = db.get('admin_settings', {})
+                    self.admin_settings.update(saved_settings)
             else:
                 self.df            = pd.DataFrame()
                 self.requests      = []
@@ -1384,9 +1406,20 @@ class DataManager:
             'schedule':      json.loads(self.df.to_json(orient='columns')),
             'requests':      self.requests,
             'vacation_data': self.vacation_data,
+            'admin_settings': self.admin_settings,
         }
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, indent=4)
+
+    # ── 교환 횟수 카운트 ────────────────────────────────────────────────────────
+    def count_accepted_exchanges(self, name):
+        """해당 인턴의 수락된(accepted) 교환 횟수를 반환."""
+        count = 0
+        for req in self.requests:
+            if req.get('status') == 'accepted':
+                if req.get('sender') == name or req.get('receiver') == name:
+                    count += 1
+        return count
 
     # ── 유틸리티 ───────────────────────────────────────────────────────────────
     def parse_cell(self, cell_value):
@@ -1655,6 +1688,12 @@ class DataManager:
         if turn in LOCKED_TURNS:
             return False, f"⛔ {turn}은(는) 교환이 불가능한 턴입니다."
 
+        # ── 관리자 설정: 인당 교환 횟수 제한 ──
+        if self.admin_settings.get('exchange_limit_enabled'):
+            limit = self.admin_settings.get('exchange_limit_count', 1)
+            if self.count_accepted_exchanges(sender) >= limit:
+                return False, f"⛔ 교환 횟수 제한({limit}회)을 초과했습니다."
+
         for req in self.requests:
             if (req['sender'] == sender and req['receiver'] == receiver
                     and req['turn'] == turn and req['status'] == 'pending'):
@@ -1665,6 +1704,13 @@ class DataManager:
 
         val_a = self.df.loc[sender, turn]
         val_b = self.df.loc[receiver, turn]
+
+        # ── 관리자 설정: 진로선택 교환 불가 ──
+        if self.admin_settings.get('block_jinro_sontaek'):
+            loc_a, dept_a = self.parse_cell(val_a)
+            loc_b, dept_b = self.parse_cell(val_b)
+            if dept_a == '진로선택' or dept_b == '진로선택':
+                return False, "⛔ 진로선택은 교환이 불가능합니다."
         if val_a == val_b:
             return False, "두 사람의 해당 턴 스케줄이 이미 동일합니다."
 
@@ -1724,6 +1770,19 @@ class DataManager:
         if action == 'accept':
             if p1 not in self.df.index or p2 not in self.df.index:
                 return False, "명단에서 인턴을 찾을 수 없습니다."
+
+            # ★ 수락 시점 교환 횟수 재검증 (신청 이후 다른 교환이 완료됐을 수 있음)
+            if self.admin_settings.get('exchange_limit_enabled'):
+                limit = self.admin_settings.get('exchange_limit_count', 1)
+                over = []
+                if self.count_accepted_exchanges(p1) >= limit:
+                    over.append(p1)
+                if self.count_accepted_exchanges(p2) >= limit:
+                    over.append(p2)
+                if over:
+                    req['status'] = 'rejected'
+                    self.save_db()
+                    return False, f"⛔ {', '.join(over)}의 교환 횟수 제한({limit}회)을 초과하여 자동 거절됩니다."
 
             # ★ 수락 전 시트 최신 데이터 갱신
             fresh_df = self.fetch_data_from_sheet()
@@ -1933,7 +1992,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'log_login'):
+if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'admin_settings'):
     st.session_state.manager = DataManager()
 mgr = st.session_state.manager
 
@@ -2029,8 +2088,9 @@ if user == 'ADMIN':
     st.title("🔐 관리자 대시보드")
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
-    adm_tab1, adm_tab2, adm_tab6, adm_tab3, adm_tab4, adm_tab5, adm_tab7 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력"
+    adm_tab1, adm_tab2, adm_tab6, adm_tab3, adm_tab4, adm_tab5, adm_tab7, adm_tab8 = st.tabs([
+        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🔄 교환 이력",
+        "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "⚙️ 교환 설정"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -2467,6 +2527,69 @@ if user == 'ADMIN':
 
             st.dataframe(filtered, use_container_width=True, hide_index=True,
                          height=min(80 + len(filtered) * 35, 500))
+
+    # ── 관리자 탭8: 교환 설정 ────────────────────────────────────────────────
+    with adm_tab8:
+        st.subheader("⚙️ 교환 규칙 설정")
+        st.caption("교환 시스템의 추가 제한 규칙을 ON/OFF 할 수 있습니다.")
+
+        st.divider()
+
+        # ── 인당 교환 횟수 제한 ──
+        st.markdown("#### 인당 교환 횟수 제한")
+        col_limit_toggle, col_limit_count = st.columns([2, 1])
+        limit_enabled = col_limit_toggle.toggle(
+            "교환 횟수 제한 활성화",
+            value=mgr.admin_settings.get('exchange_limit_enabled', False),
+            key="adm_exchange_limit_toggle",
+            help="활성화하면 인턴 1인당 교환 가능 횟수를 제한합니다."
+        )
+        limit_count = col_limit_count.number_input(
+            "최대 횟수",
+            min_value=1, max_value=10,
+            value=mgr.admin_settings.get('exchange_limit_count', 1),
+            key="adm_exchange_limit_count",
+            disabled=not limit_enabled
+        )
+
+        if limit_enabled:
+            st.info(f"현재 설정: 인당 최대 **{limit_count}회** 교환 가능")
+            # 인턴별 교환 현황
+            ex_rows = []
+            for intern in mgr.df.index:
+                cnt = mgr.count_accepted_exchanges(intern)
+                ex_rows.append({
+                    '이름': intern,
+                    '교환 횟수': cnt,
+                    '상태': '🔴 제한 도달' if cnt >= limit_count else '🟢 교환 가능'
+                })
+            if ex_rows:
+                ex_df = pd.DataFrame(ex_rows)
+                st.dataframe(ex_df, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # ── 진로선택 교환 불가 ──
+        st.markdown("#### 진로선택 교환 불가")
+        block_jinro = st.toggle(
+            "진로선택 과목 교환 차단",
+            value=mgr.admin_settings.get('block_jinro_sontaek', False),
+            key="adm_block_jinro_toggle",
+            help="활성화하면 '진로선택' 과목이 포함된 턴의 교환을 차단합니다."
+        )
+        if block_jinro:
+            st.info("진로선택 과목이 포함된 교환은 **자동 차단**됩니다.")
+
+        st.divider()
+
+        # ── 설정 저장 버튼 ──
+        if st.button("💾 설정 저장", type="primary", use_container_width=True, key="adm_save_settings"):
+            mgr.admin_settings['exchange_limit_enabled'] = limit_enabled
+            mgr.admin_settings['exchange_limit_count'] = limit_count
+            mgr.admin_settings['block_jinro_sontaek'] = block_jinro
+            mgr.save_db()
+            st.success("✅ 설정이 저장되었습니다.")
+            st.rerun()
 
     st.stop()
 
