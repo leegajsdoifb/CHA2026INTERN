@@ -1624,7 +1624,7 @@ class DataManager:
     def validate_vacation_exchange(self, sender, receiver, turn):
         """
         단일 턴 교환 시 휴가 규칙 검증.
-        규칙: 한쪽만 휴가턴이면 차단 (복합 교환으로 해결 안내).
+        규칙: 한쪽만 휴가턴이면 차단.
               둘 다 휴가턴이면 그룹(A/B/C) 무관 교환 OK.
         반환: (ok: bool, errors: list)
         """
@@ -1636,13 +1636,11 @@ class DataManager:
             pass  # 둘 다 휴가 → OK
         elif s_has:
             errors.append(
-                f"⛔ {sender}의 휴가 턴({turn})입니다. "
-                f"복합 교환으로 {receiver}에게서 다른 휴가턴을 받아오세요."
+                f"⛔ {sender}의 휴가 턴({turn})입니다. 휴가턴끼리만 교환 가능합니다."
             )
         elif r_has:
             errors.append(
-                f"⛔ {receiver}의 휴가 턴({turn})입니다. "
-                f"복합 교환으로 {receiver}에게 다른 휴가턴을 주세요."
+                f"⛔ {receiver}의 휴가 턴({turn})입니다. 휴가턴끼리만 교환 가능합니다."
             )
 
         return len(errors) == 0, errors
@@ -1673,15 +1671,13 @@ class DataManager:
                     diff = bal['given'] - bal['received']
                     errors.append(
                         f"⛔ {target}에게 휴가턴 {bal['given']}개를 주고 "
-                        f"{bal['received']}개만 받습니다. "
-                        f"{target}에게서 휴가턴 {diff}개를 추가로 받아오세요."
+                        f"{bal['received']}개만 받습니다."
                     )
                 else:
                     diff = bal['received'] - bal['given']
                     errors.append(
                         f"⛔ {target}에게서 휴가턴 {bal['received']}개를 받고 "
-                        f"{bal['given']}개만 줍니다. "
-                        f"{target}에게 휴가턴 {diff}개를 추가로 주세요."
+                        f"{bal['given']}개만 줍니다."
                     )
 
         return len(errors) == 0, errors
@@ -3274,10 +3270,11 @@ if _exchange_limit_active:
         st.info(f"🔄 교환 기회: **{_exchange_remaining}회 남음** (총 {_exchange_limit_count}회 중 {_my_exchange_count}회 사용)")
     else:
         st.error(f"⛔ 교환 기회를 모두 사용했습니다. ({_my_exchange_count}/{_exchange_limit_count}회)")
-        st.stop()
+
+_exchange_exhausted = _exchange_limit_active and _exchange_remaining is not None and _exchange_remaining <= 0
 
 # 항목이 없으면 기본값 1개 추가
-if not st.session_state.exchange_items and others and avail_turns:
+if not _exchange_exhausted and not st.session_state.exchange_items and others and avail_turns:
     st.session_state.exchange_items.append({
         'id': st.session_state.ei_counter,
         'target': others[0],
@@ -3285,9 +3282,11 @@ if not st.session_state.exchange_items and others and avail_turns:
     })
     st.session_state.ei_counter += 1
 
-# 각 항목 렌더링
+# 각 항목 렌더링 (교환 기회 소진 시 숨김)
+if _exchange_exhausted:
+    others = others  # others 변수는 스케줄 표시에서도 사용하므로 유지
 to_remove = []
-for i, item in enumerate(st.session_state.exchange_items):
+for i, item in enumerate(st.session_state.exchange_items if not _exchange_exhausted else []):
     iid = item['id']
     num_label = '①②③④⑤'[i] if i < 5 else f'{i+1}.'
     t_default    = item.get('target', others[0])    if others      else ''
@@ -3363,7 +3362,7 @@ if to_remove:
 
 # 합산 검증 표시
 can_send = False
-if st.session_state.exchange_items:
+if not _exchange_exhausted and st.session_state.exchange_items:
     exchanges = [{'target': it['target'], 'turn': it['turn']}
                  for it in st.session_state.exchange_items]
     can_send, errs = mgr.validate_multi_exchange(user, exchanges)
@@ -3471,31 +3470,32 @@ if st.session_state.exchange_items:
                         st.rerun()
                     st.divider()
 
-if _exchange_limit_active and _exchange_limit_count <= 1:
-    # 1회 제한 모드: 항목 추가 버튼 숨김, 요청 버튼만 표시
-    col_send = st.columns(1)[0]
-else:
-    col_add, col_send = st.columns([1, 3])
-    if col_add.button("➕ 항목 추가", key="ei_add", disabled=not can_send):
-        if others and avail_turns:
-            st.session_state.exchange_items.append({
-                'id': st.session_state.ei_counter,
-                'target': others[0],
-                'turn': avail_turns[0]
-            })
-            st.session_state.ei_counter += 1
-            st.rerun()
+if not _exchange_exhausted:
+    if _exchange_limit_active and _exchange_limit_count <= 1:
+        # 1회 제한 모드: 항목 추가 버튼 숨김, 요청 버튼만 표시
+        col_send = st.columns(1)[0]
+    else:
+        col_add, col_send = st.columns([1, 3])
+        if col_add.button("➕ 항목 추가", key="ei_add", disabled=not can_send):
+            if others and avail_turns:
+                st.session_state.exchange_items.append({
+                    'id': st.session_state.ei_counter,
+                    'target': others[0],
+                    'turn': avail_turns[0]
+                })
+                st.session_state.ei_counter += 1
+                st.rerun()
 
-if col_send.button("📨 요청 보내기", type="primary", use_container_width=True,
-                   disabled=not can_send):
-    confirm_items = []
-    for it in st.session_state.exchange_items:
-        mv = mgr.df.loc[user,       it['turn']] if user         in mgr.df.index else '?'
-        pv = mgr.df.loc[it['target'], it['turn']] if it['target'] in mgr.df.index else '?'
-        confirm_items.append({'target': it['target'], 'turn': it['turn'],
-                               'my_val': mv, 'partner_val': pv})
-    st.session_state.multi_confirm = confirm_items
-    st.rerun()
+    if col_send.button("📨 요청 보내기", type="primary", use_container_width=True,
+                       disabled=not can_send):
+        confirm_items = []
+        for it in st.session_state.exchange_items:
+            mv = mgr.df.loc[user,       it['turn']] if user         in mgr.df.index else '?'
+            pv = mgr.df.loc[it['target'], it['turn']] if it['target'] in mgr.df.index else '?'
+            confirm_items.append({'target': it['target'], 'turn': it['turn'],
+                                   'my_val': mv, 'partner_val': pv})
+        st.session_state.multi_confirm = confirm_items
+        st.rerun()
 
 # ──────────────────────────────────────────────────────────────────────────────
 # ② 전체 스케줄 (교환 신청 바로 아래)
@@ -3703,9 +3703,9 @@ with tab_browse:
 # ── 장터: 내 턴 올리기 ──────────────────────────────────────────────────────
 with tab_post:
     st.write("#### 교환 요청 올리기")
-    if _exchange_limit_active and _my_exchange_count >= _exchange_limit_count:
+    _mkt_post_blocked = _exchange_limit_active and _my_exchange_count >= _exchange_limit_count
+    if _mkt_post_blocked:
         st.error(f"⛔ 교환 기회를 모두 사용하여 장터 등록이 불가합니다. ({_my_exchange_count}/{_exchange_limit_count})")
-        st.stop()
     fv = st.session_state.mkt_form_version
     # 등록 성공 메시지 (폼 리셋 후 표시)
     if st.session_state.mkt_post_success:
@@ -3778,7 +3778,7 @@ with tab_post:
         key=f"mkt_msg_inp_{fv}", max_chars=100
     )
     if st.button("📌 장터에 등록", type="primary", key=f"btn_mkt_post_{fv}",
-                 disabled=not can_post):
+                 disabled=not can_post or _mkt_post_blocked):
         ok, msg = mgr.add_market_post(user, give_turn_k, give_val_k, want_str_k, p_msg)
         if ok:
             st.session_state.mkt_post_success = '장터에 등록되었습니다! 🎉'
