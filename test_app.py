@@ -1309,6 +1309,7 @@ class TestChainEdgeCases(unittest.TestCase):
         """3건 체인 — 모두 수락 시 일괄 실행."""
         dm = make_dm()
         chain_id = 'chain3'
+        # C의 10턴은 휴가턴이므로 11턴(NR↔EM, 비휴가)으로 변경
         reqs = [
             {'id': 'r1', 'chain_id': chain_id, 'sender': 'A', 'receiver': 'B',
              'turn': '3턴', 'val_sender': 'OB', 'val_receiver': 'IM',
@@ -1317,7 +1318,7 @@ class TestChainEdgeCases(unittest.TestCase):
              'turn': '6턴', 'val_sender': 'IM', 'val_receiver': 'GS',
              'status': 'pending', 'timestamp': '2026-01-01', 'message': ''},
             {'id': 'r3', 'chain_id': chain_id, 'sender': 'A', 'receiver': 'C',
-             'turn': '10턴', 'val_sender': 'ANE', 'val_receiver': 'DER',
+             'turn': '11턴', 'val_sender': 'EM', 'val_receiver': 'NR',
              'status': 'pending', 'timestamp': '2026-01-01', 'message': ''},
         ]
         dm.requests = reqs
@@ -1416,10 +1417,11 @@ class TestValidateMultiExchangeAdvanced(unittest.TestCase):
     def test_three_exchanges_all_valid(self):
         """3건 교환이 모두 유효한 경우."""
         dm = make_dm()
+        # C의 10턴은 휴가턴이므로 11턴(비휴가)으로 변경
         exs = [
             {'target': 'B', 'turn': '3턴'},   # A:OB↔B:IM
             {'target': 'B', 'turn': '6턴'},   # A:IM↔B:GS
-            {'target': 'C', 'turn': '10턴'},  # A:ANE↔C:DER
+            {'target': 'C', 'turn': '11턴'},  # A:EM↔C:NR
         ]
         ok, errs = dm.validate_multi_exchange('A', exs)
         self.assertTrue(ok, f"Expected valid 3-way exchange but got: {errs}")
@@ -1489,138 +1491,6 @@ class TestSimulateMultiSwapAdvanced(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════════
 #  관리자 설정 — 교환 횟수 제한 & 진로선택 차단
 # ══════════════════════════════════════════════════════════════════════════════
-
-class TestAdminExchangeLimit(unittest.TestCase):
-    """인당 교환 횟수 제한 테스트."""
-
-    def test_limit_disabled_allows_multiple(self):
-        """제한 비활성화 시 여러 교환 가능."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = False
-        # 이미 1건 수락된 상태 (4턴)
-        dm.requests = [{'id': 'old', 'sender': 'A', 'receiver': 'B', 'turn': '4턴',
-                        'val_sender': 'PE', 'val_receiver': 'ANE', 'status': 'accepted',
-                        'timestamp': '2026-01-01', 'message': ''}]
-        ok, _ = dm.add_request('A', 'C', '3턴')
-        self.assertTrue(ok)
-
-    def test_limit_enabled_blocks_over_limit(self):
-        """제한 활성화 시 초과 교환 차단."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        dm.requests = [{'id': 'old', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
-                        'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'accepted',
-                        'timestamp': '2026-01-01', 'message': ''}]
-        ok, msg = dm.add_request('A', 'C', '6턴')
-        self.assertFalse(ok)
-        self.assertIn('제한', msg)
-
-    def test_limit_counts_both_sender_and_receiver(self):
-        """receiver로 참여한 교환도 횟수에 포함."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        # B가 receiver로 1건 수락
-        dm.requests = [{'id': 'old', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
-                        'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'accepted',
-                        'timestamp': '2026-01-01', 'message': ''}]
-        ok, msg = dm.add_request('B', 'C', '6턴')
-        self.assertFalse(ok)
-        self.assertIn('제한', msg)
-
-    def test_rejected_not_counted(self):
-        """거절된 교환은 횟수에 포함되지 않음."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        dm.requests = [{'id': 'old', 'sender': 'A', 'receiver': 'B', 'turn': '4턴',
-                        'val_sender': 'PE', 'val_receiver': 'ANE', 'status': 'rejected',
-                        'timestamp': '2026-01-01', 'message': ''}]
-        ok, _ = dm.add_request('A', 'C', '3턴')
-        self.assertTrue(ok)
-
-    def test_chain_request_blocked_over_limit(self):
-        """체인 교환도 횟수 제한 적용."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        dm.requests = [{'id': 'old', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
-                        'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'accepted',
-                        'timestamp': '2026-01-01', 'message': ''}]
-        ok, msg = dm.add_chain_request('A', [{'receiver': 'C', 'turn': '6턴'}])
-        self.assertFalse(ok)
-        self.assertIn('제한', msg)
-
-    def test_accept_blocked_when_receiver_over_limit(self):
-        """수락 시점에 receiver의 교환 횟수가 초과되면 자동 거절."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        # B가 이미 1건 수락
-        dm.requests = [
-            {'id': 'old', 'sender': 'C', 'receiver': 'B', 'turn': '6턴',
-             'val_sender': 'IM', 'val_receiver': 'GS', 'status': 'accepted',
-             'timestamp': '2026-01-01', 'message': ''},
-            {'id': 'new', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
-             'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'pending',
-             'timestamp': '2026-01-01', 'message': ''},
-        ]
-        ok, msg = dm.process_request('new', 'accept')
-        self.assertFalse(ok)
-        self.assertIn('제한', msg)
-
-
-    def test_receiver_over_limit_blocked_at_request(self):
-        """신청 시 receiver의 교환 기회가 없으면 차단."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        # B가 이미 1건 수락
-        dm.requests = [{'id': 'old', 'sender': 'C', 'receiver': 'B', 'turn': '4턴',
-                        'val_sender': 'PE', 'val_receiver': 'ANE', 'status': 'accepted',
-                        'timestamp': '2026-01-01', 'message': ''}]
-        ok, msg = dm.add_request('A', 'B', '3턴')
-        self.assertFalse(ok)
-        self.assertIn('기회', msg)
-
-    def test_auto_reject_pending_on_accept(self):
-        """교환 수락 시 한도 도달한 인턴의 다른 pending 요청이 자동 거절."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        dm.requests = [
-            {'id': 'req1', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
-             'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'pending',
-             'timestamp': '2026-01-01', 'message': ''},
-            {'id': 'req2', 'sender': 'A', 'receiver': 'C', 'turn': '5턴',
-             'val_sender': 'GS', 'val_receiver': 'PE', 'status': 'pending',
-             'timestamp': '2026-01-01', 'message': ''},
-        ]
-        ok, msg = dm.process_request('req1', 'accept')
-        self.assertTrue(ok)
-        # req2는 A의 기회 소진으로 자동 거절
-        req2 = next(r for r in dm.requests if r['id'] == 'req2')
-        self.assertEqual(req2['status'], 'rejected')
-
-    def test_auto_reject_does_not_touch_other_interns(self):
-        """자동 거절 시 관련 없는 인턴의 요청은 영향 없음."""
-        dm = make_dm()
-        dm.admin_settings['exchange_limit_enabled'] = True
-        dm.admin_settings['exchange_limit_count'] = 1
-        dm.requests = [
-            {'id': 'req1', 'sender': 'A', 'receiver': 'B', 'turn': '3턴',
-             'val_sender': 'OB', 'val_receiver': 'IM', 'status': 'pending',
-             'timestamp': '2026-01-01', 'message': ''},
-            {'id': 'req3', 'sender': 'C', 'receiver': 'D', 'turn': '5턴',
-             'val_sender': 'PE', 'val_receiver': 'ANE', 'status': 'pending',
-             'timestamp': '2026-01-01', 'message': ''},
-        ]
-        dm.process_request('req1', 'accept')
-        # C↔D 요청은 영향 없음
-        req3 = next(r for r in dm.requests if r['id'] == 'req3')
-        self.assertEqual(req3['status'], 'pending')
-
 
 class TestAdminBlockJinroSontaek(unittest.TestCase):
     """진로선택 교환 차단 테스트."""

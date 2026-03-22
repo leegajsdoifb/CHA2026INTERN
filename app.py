@@ -62,8 +62,6 @@ class DataManager:
         self.market_posts = []
         self.vacation_data = {}   # {이름: {'1차': {'turn':X,'type':Y}, '2차': {'turn':X,'type':Y}}}
         self.admin_settings = {
-            'exchange_limit_enabled': False,   # 인당 교환 횟수 제한 ON/OFF
-            'exchange_limit_count': 1,         # 인당 최대 교환 횟수
             'block_jinro_sontaek': False,      # 진로선택 교환 불가 ON/OFF
         }
         self.connect_google_sheet()
@@ -834,17 +832,6 @@ class DataManager:
         chain_id = now_kst().strftime("%Y%m%d%H%M%S%f")[:17]
         created_reqs = []
 
-        # ── 관리자 설정: 인당 교환 횟수 제한 ──
-        if self.admin_settings.get('exchange_limit_enabled'):
-            limit = self.admin_settings.get('exchange_limit_count', 1)
-            if self.count_accepted_exchanges(sender) >= limit:
-                return False, f"⛔ 내 교환 횟수 제한({limit}회)을 초과했습니다."
-            # 모든 receiver 체크
-            for s in swaps:
-                recv = s['receiver']
-                if self.count_accepted_exchanges(recv) >= limit:
-                    return False, f"⛔ {recv}의 교환 기회가 없습니다. ({limit}회 모두 사용)"
-
         for s in swaps:
             receiver = s['receiver']
             turn = s['turn']
@@ -1088,22 +1075,6 @@ class DataManager:
             # 모든 건 수락 → 최신 데이터 갱신 후 재검증 후 일괄 실행
             sender = chain_reqs[0]['sender']
 
-            # ★ 교환 횟수 제한 재검증
-            if self.admin_settings.get('exchange_limit_enabled'):
-                limit = self.admin_settings.get('exchange_limit_count', 1)
-                over = []
-                if self.count_accepted_exchanges(sender) >= limit:
-                    over.append(sender)
-                all_receivers = set(r['receiver'] for r in chain_reqs)
-                for recv in all_receivers:
-                    if self.count_accepted_exchanges(recv) >= limit:
-                        over.append(recv)
-                if over:
-                    for r in chain_reqs:
-                        r['status'] = 'chain_rejected'
-                    self.save_db()
-                    return False, f"⛔ {', '.join(over)}의 교환 횟수 제한({limit}회)을 초과하여 자동 거절됩니다."
-
             # ★ 수락 전 시트 최신 데이터 갱신
             fresh_df = self.fetch_data_from_sheet()
             if not fresh_df.empty:
@@ -1193,14 +1164,6 @@ class DataManager:
                 )
                 self.auto_close_market_posts(r['sender'], r['turn'])
                 self.auto_close_market_posts(r['receiver'], r['turn'])
-
-            # ★ 교환 횟수 제한 시: 한도 도달한 인턴의 다른 pending 요청 자동 거절
-            if self.admin_settings.get('exchange_limit_enabled'):
-                limit = self.admin_settings.get('exchange_limit_count', 1)
-                involved = {sender} | {r['receiver'] for r in chain_reqs}
-                for person in involved:
-                    if self.count_accepted_exchanges(person) >= limit:
-                        self._auto_reject_pending(person, exclude_ids=chain_req_ids)
 
             self.save_db()
             return True, f"🎉 복합 교환 {len(chain_reqs)}건 모두 완료!"
@@ -1448,58 +1411,6 @@ class DataManager:
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, indent=4)
 
-    # ── 교환 횟수 카운트 ────────────────────────────────────────────────────────
-    def count_accepted_exchanges(self, name):
-        """해당 인턴의 수락된 교환 횟수를 반환.
-        - 단건 교환: 각각 1회
-        - 체인(복합) 교환: 같은 chain_id는 1회로 카운트
-        """
-        counted_chains = set()
-        count = 0
-        for req in self.requests:
-            if req.get('status') != 'accepted':
-                continue
-            if req.get('sender') != name and req.get('receiver') != name:
-                continue
-            chain_id = req.get('chain_id')
-            if chain_id:
-                if chain_id not in counted_chains:
-                    counted_chains.add(chain_id)
-                    count += 1
-            else:
-                count += 1
-        return count
-
-    def _auto_reject_pending(self, name, exclude_id=None, exclude_ids=None):
-        """해당 인턴이 관련된 모든 pending 요청을 자동 거절.
-        exclude_id/exclude_ids: 방금 수락된 요청은 제외.
-        """
-        skip = set()
-        if exclude_id:
-            skip.add(exclude_id)
-        if exclude_ids:
-            skip.update(exclude_ids)
-
-        rejected_chains = set()
-        for req in self.requests:
-            if req['id'] in skip:
-                continue
-            if req.get('status') not in ('pending', 'chain_accepted'):
-                continue
-            if req.get('sender') != name and req.get('receiver') != name:
-                continue
-            # 체인 요청이면 체인 전체를 거절
-            chain_id = req.get('chain_id')
-            if chain_id and chain_id not in rejected_chains:
-                rejected_chains.add(chain_id)
-                for cr in self.requests:
-                    if cr.get('chain_id') == chain_id and cr['status'] in ('pending', 'chain_accepted'):
-                        cr['status'] = 'chain_rejected'
-                        cr['message'] = f'{name} 교환 기회 소진으로 자동 거절'
-            elif not chain_id:
-                req['status'] = 'rejected'
-                req['message'] = f'{name} 교환 기회 소진으로 자동 거절'
-
     # ── 유틸리티 ───────────────────────────────────────────────────────────────
     def parse_cell(self, cell_value):
         if cell_value is None or (isinstance(cell_value, float) and pd.isna(cell_value)):
@@ -1642,11 +1553,13 @@ class DataManager:
             pass  # 둘 다 휴가 → OK
         elif s_has:
             errors.append(
-                f"⛔ {sender}의 휴가 턴({turn})입니다. 휴가턴끼리만 교환 가능합니다."
+                f"⛔ {sender}의 휴가 턴({turn})입니다. 휴가턴끼리만 교환 가능합니다. "
+                f"→ 복합 교환으로 {receiver}에게서 다른 휴가턴을 받아오세요."
             )
         elif r_has:
             errors.append(
-                f"⛔ {receiver}의 휴가 턴({turn})입니다. 휴가턴끼리만 교환 가능합니다."
+                f"⛔ {receiver}의 휴가 턴({turn})입니다. 휴가턴끼리만 교환 가능합니다. "
+                f"→ 복합 교환으로 {receiver}에게 다른 휴가턴을 주세요."
             )
 
         return len(errors) == 0, errors
@@ -1677,13 +1590,15 @@ class DataManager:
                     diff = bal['given'] - bal['received']
                     errors.append(
                         f"⛔ {target}에게 휴가턴 {bal['given']}개를 주고 "
-                        f"{bal['received']}개만 받습니다."
+                        f"{bal['received']}개만 받습니다. "
+                        f"→ {target}에게서 휴가턴 {diff}개를 추가로 받아오세요."
                     )
                 else:
                     diff = bal['received'] - bal['given']
                     errors.append(
                         f"⛔ {target}에게서 휴가턴 {bal['received']}개를 받고 "
-                        f"{bal['given']}개만 줍니다."
+                        f"{bal['given']}개만 줍니다. "
+                        f"→ {target}에게 휴가턴 {diff}개를 추가로 주세요."
                     )
 
         return len(errors) == 0, errors
@@ -1697,16 +1612,6 @@ class DataManager:
         """
         if not exchanges:
             return False, ["교환 항목이 없습니다."]
-
-        # ── 관리자 설정: 교환 횟수 제한 ──
-        if self.admin_settings.get('exchange_limit_enabled'):
-            limit = self.admin_settings.get('exchange_limit_count', 1)
-            if self.count_accepted_exchanges(sender) >= limit:
-                return False, [f"⛔ 내 교환 횟수 제한({limit}회)을 초과했습니다."]
-            for ex in exchanges:
-                target = ex['target']
-                if self.count_accepted_exchanges(target) >= limit:
-                    return False, [f"⛔ {target}의 교환 기회가 없습니다. ({limit}회 모두 사용)"]
 
         # 중복 (target, turn) 체크
         seen_pairs = set()
@@ -1773,18 +1678,14 @@ class DataManager:
         if turn in LOCKED_TURNS:
             return False, f"⛔ {turn}은(는) 교환이 불가능한 턴입니다."
 
-        # ── 관리자 설정: 인당 교환 횟수 제한 ──
-        if self.admin_settings.get('exchange_limit_enabled'):
-            limit = self.admin_settings.get('exchange_limit_count', 1)
-            if self.count_accepted_exchanges(sender) >= limit:
-                return False, f"⛔ 내 교환 횟수 제한({limit}회)을 초과했습니다."
-            if self.count_accepted_exchanges(receiver) >= limit:
-                return False, f"⛔ {receiver}의 교환 기회가 없습니다. ({limit}회 모두 사용)"
-
         for req in self.requests:
-            if (req['sender'] == sender and req['receiver'] == receiver
-                    and req['turn'] == turn and req['status'] == 'pending'):
-                return False, "이미 대기 중인 동일 요청이 있습니다."
+            if req['status'] != 'pending':
+                continue
+            if req['turn'] != turn:
+                continue
+            involved = {req['sender'], req['receiver']}
+            if sender in involved or receiver in involved:
+                return False, f"이미 {turn}에 대기 중인 교환 요청이 있습니다."
 
         if sender not in self.df.index or receiver not in self.df.index:
             return False, "명단에서 인턴을 찾을 수 없습니다."
@@ -1842,6 +1743,10 @@ class DataManager:
         if not req:
             return False, "요청을 찾을 수 없습니다."
 
+        # 이미 처리된 요청은 재처리 불가
+        if req.get('status') != 'pending':
+            return False, f"이미 처리된 요청입니다. (상태: {req['status']})"
+
         p1, p2, turn = req['sender'], req['receiver'], req['turn']
         val_a = self.df.loc[p1, turn] if p1 in self.df.index else req.get('val_sender', '')
         val_b = self.df.loc[p2, turn] if p2 in self.df.index else req.get('val_receiver', '')
@@ -1857,19 +1762,6 @@ class DataManager:
         if action == 'accept':
             if p1 not in self.df.index or p2 not in self.df.index:
                 return False, "명단에서 인턴을 찾을 수 없습니다."
-
-            # ★ 수락 시점 교환 횟수 재검증 (신청 이후 다른 교환이 완료됐을 수 있음)
-            if self.admin_settings.get('exchange_limit_enabled'):
-                limit = self.admin_settings.get('exchange_limit_count', 1)
-                over = []
-                if self.count_accepted_exchanges(p1) >= limit:
-                    over.append(p1)
-                if self.count_accepted_exchanges(p2) >= limit:
-                    over.append(p2)
-                if over:
-                    req['status'] = 'rejected'
-                    self.save_db()
-                    return False, f"⛔ {', '.join(over)}의 교환 횟수 제한({limit}회)을 초과하여 자동 거절됩니다."
 
             # ★ 수락 전 시트 최신 데이터 갱신
             fresh_df = self.fetch_data_from_sheet()
@@ -1923,13 +1815,6 @@ class DataManager:
                 return False, "구글 시트 반영 오류. 취소됩니다."
 
             req['status'] = 'accepted'
-
-            # ★ 교환 횟수 제한 시: 한도 도달한 인턴의 다른 pending 요청 자동 거절
-            if self.admin_settings.get('exchange_limit_enabled'):
-                limit = self.admin_settings.get('exchange_limit_count', 1)
-                for person in (p1, p2):
-                    if self.count_accepted_exchanges(person) >= limit:
-                        self._auto_reject_pending(person, exclude_id=req['id'])
 
             self.save_db()
             self.log_history_to_sheet(p1, p2, turn, val_a, val_b, '수락됨')
@@ -2091,10 +1976,6 @@ if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'a
     st.session_state.manager = DataManager()
 mgr = st.session_state.manager
 
-# ── 교환 제한 전역 변수 ──
-_exchange_limit_active = mgr.admin_settings.get('exchange_limit_enabled', False)
-_exchange_limit_count = mgr.admin_settings.get('exchange_limit_count', 1)
-
 if 'quick_confirm' not in st.session_state:
     st.session_state.quick_confirm = None
 if 'multi_confirm' not in st.session_state:
@@ -2112,6 +1993,8 @@ if 'mkt_form_version' not in st.session_state:
     st.session_state.mkt_form_version = 0
 if 'mkt_post_success' not in st.session_state:
     st.session_state.mkt_post_success = ''
+if 'force_pw_change' not in st.session_state:
+    st.session_state.force_pw_change = False
 
 # ── 로그인 ────────────────────────────────────────────────────────────────────
 if 'user_id' not in st.session_state:
@@ -2634,40 +2517,6 @@ if user == 'ADMIN':
 
         st.divider()
 
-        # ── 인당 교환 횟수 제한 ──
-        st.markdown("#### 인당 교환 횟수 제한")
-        col_limit_toggle, col_limit_count = st.columns([2, 1])
-        limit_enabled = col_limit_toggle.toggle(
-            "교환 횟수 제한 활성화",
-            value=mgr.admin_settings.get('exchange_limit_enabled', False),
-            key="adm_exchange_limit_toggle",
-            help="활성화하면 인턴 1인당 교환 가능 횟수를 제한합니다."
-        )
-        limit_count = col_limit_count.number_input(
-            "최대 횟수",
-            min_value=1, max_value=10,
-            value=mgr.admin_settings.get('exchange_limit_count', 1),
-            key="adm_exchange_limit_count",
-            disabled=not limit_enabled
-        )
-
-        if limit_enabled:
-            st.info(f"현재 설정: 인당 최대 **{limit_count}회** 교환 가능")
-            # 인턴별 교환 현황
-            ex_rows = []
-            for intern in mgr.df.index:
-                cnt = mgr.count_accepted_exchanges(intern)
-                ex_rows.append({
-                    '이름': intern,
-                    '교환 횟수': cnt,
-                    '상태': '🔴 제한 도달' if cnt >= limit_count else '🟢 교환 가능'
-                })
-            if ex_rows:
-                ex_df = pd.DataFrame(ex_rows)
-                st.dataframe(ex_df, use_container_width=True, hide_index=True)
-
-        st.divider()
-
         # ── 진로선택 교환 불가 ──
         st.markdown("#### 진로선택 교환 불가")
         block_jinro = st.toggle(
@@ -2683,8 +2532,6 @@ if user == 'ADMIN':
 
         # ── 설정 저장 버튼 ──
         if st.button("💾 설정 저장", type="primary", use_container_width=True, key="adm_save_settings"):
-            mgr.admin_settings['exchange_limit_enabled'] = limit_enabled
-            mgr.admin_settings['exchange_limit_count'] = limit_count
             mgr.admin_settings['block_jinro_sontaek'] = block_jinro
             mgr.save_db()
             st.success("✅ 설정이 저장되었습니다.")
@@ -2756,16 +2603,6 @@ with st.sidebar:
     else:
         st.caption('🏖️ 휴가: 배정 없음')
 
-    # 교환 기회 표시
-    if mgr.admin_settings.get('exchange_limit_enabled'):
-        _sb_limit = mgr.admin_settings.get('exchange_limit_count', 1)
-        _sb_used = mgr.count_accepted_exchanges(user)
-        _sb_remain = max(0, _sb_limit - _sb_used)
-        if _sb_remain > 0:
-            st.caption(f"🔄 교환: **{_sb_remain}회 남음** ({_sb_used}/{_sb_limit})")
-        else:
-            st.caption(f"⛔ 교환: **기회 소진** ({_sb_used}/{_sb_limit})")
-
     # ── 비밀번호 변경 (compact) ────────────────────────────────────────────────
     with st.expander("🔑 비밀번호 변경"):
         old_pw  = st.text_input("현재",        type="password", key="old_pw")
@@ -2827,19 +2664,9 @@ with st.sidebar:
                     st.caption(f"상대: `{snd_v}` ↔ 나: `{my_v}`  _{req.get('timestamp', '')[:10]}_")
                     if req.get('message'):
                         st.info(f"💬 {req['message']}")
-                    _req_blocked = False
-                    if _exchange_limit_active:
-                        _snd_over = mgr.count_accepted_exchanges(req['sender']) >= _exchange_limit_count
-                        _rcv_over = mgr.count_accepted_exchanges(user) >= _exchange_limit_count
-                        if _snd_over or _rcv_over:
-                            _who = []
-                            if _snd_over: _who.append(f"{req['sender']}(신청자)")
-                            if _rcv_over: _who.append("나")
-                            st.warning(f"⛔ {', '.join(_who)}의 교환 기회가 소진되어 수락 불가")
-                            _req_blocked = True
                     ca, cb = st.columns(2)
                     if ca.button("✅ 수락", key=f"sb_acc_{req['id']}", type="primary",
-                                 use_container_width=True, disabled=_req_blocked):
+                                 use_container_width=True):
                         succ, msg = mgr.process_request(req['id'], 'accept')
                         if succ: st.success(msg); st.rerun()
                         else:    st.error(msg)
@@ -2869,22 +2696,11 @@ with st.sidebar:
                         st.write(f"  • **{_ch_tlbl}**: `{snd_v}` ↔ 나: `{my_v}`")
                         if req.get('message'):
                             st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;💬 {req['message']}")
-                    _chain_blocked = False
-                    if _exchange_limit_active:
-                        _chain_over = []
-                        _chain_sender = reqs[0]['sender']
-                        if mgr.count_accepted_exchanges(_chain_sender) >= _exchange_limit_count:
-                            _chain_over.append(f"{_chain_sender}(신청자)")
-                        if mgr.count_accepted_exchanges(user) >= _exchange_limit_count:
-                            _chain_over.append("나")
-                        if _chain_over:
-                            st.warning(f"⛔ {', '.join(_chain_over)}의 교환 기회가 소진되어 수락 불가")
-                            _chain_blocked = True
                     ca, cb = st.columns(2)
                     # 체인은 내게 해당하는 건만 일괄 수락/거절
                     my_chain_reqs = [r for r in reqs if r['status'] == 'pending']
                     if ca.button("✅ 수락", key=f"sb_chacc_{cid}", type="primary",
-                                 use_container_width=True, disabled=_chain_blocked):
+                                 use_container_width=True):
                         last_msg = ""
                         for r in my_chain_reqs:
                             succ, last_msg = mgr.process_chain_action(cid, r['id'], 'accept', user)
@@ -2970,9 +2786,7 @@ with st.sidebar:
 
     # ── 교환 시뮬레이션 ───────────────────────────────────────────────────────
     st.subheader("🧪 교환 시뮬레이션")
-    _sim_modes = ["🔄 특정 턴 교환", "🎯 특정 턴 받기"]
-    if not _exchange_limit_active or _exchange_limit_count > 1:
-        _sim_modes.append("🔗 복합 교환 탐색")
+    _sim_modes = ["🔄 특정 턴 교환", "🎯 특정 턴 받기", "🔗 복합 교환 탐색"]
     sim_mode = st.radio(
         "모드",
         _sim_modes,
@@ -3015,22 +2829,16 @@ with st.sidebar:
                     st.caption(f"전체 {len(results_s1)}명 중 가능: **{valid_s1}명**")
                     for r in disp_s1:
                         icon_r = "✅" if r['valid'] else "❌"
-                        # 상대방 교환 기회 체크
-                        _partner_no_chance = False
-                        if _exchange_limit_active:
-                            _partner_no_chance = mgr.count_accepted_exchanges(r['partner']) >= _exchange_limit_count
                         col_a, col_b = st.columns([3, 1])
                         _tags = []
                         if r['has_pending']:
                             _tags.append('⏳')
-                        if _partner_no_chance:
-                            _tags.append('⛔기회소진')
                         col_a.write(f"{icon_r} **{r['partner']}**{'  ' + ' '.join(_tags) if _tags else ''}")
                         col_a.caption(
                             f"`{r['partner_val']}`" +
                             (f"  ⚠️ {' / '.join(r['reasons'])}" if r['reasons'] else "")
                         )
-                        if r['valid'] and not r['has_pending'] and not _partner_no_chance:
+                        if r['valid'] and not r['has_pending']:
                             if col_b.button("요청", key=f"sbsim1_{r['partner']}_{sim_turn}", type="primary"):
                                 st.session_state.quick_confirm = {
                                     'receiver': r['partner'], 'turn': sim_turn,
@@ -3039,8 +2847,6 @@ with st.sidebar:
                                 st.rerun()
                         elif r['has_pending']:
                             col_b.caption("⏳")
-                        elif _partner_no_chance:
-                            col_b.caption("⛔")
 
     elif sim_mode == "🎯 특정 턴 받기":
         st.caption("받고 싶은 과목을 선택하면 해당 과목을 받을 수 있는 모든 조합을 탐색합니다.")
@@ -3073,21 +2879,16 @@ with st.sidebar:
                     st.caption(f"전체 {len(results_s2)}개 중 가능: **{valid_s2}개**")
                     for r in disp_s2:
                         icon_r = "✅" if r['valid'] else "❌"
-                        _partner_no_chance2 = False
-                        if _exchange_limit_active:
-                            _partner_no_chance2 = mgr.count_accepted_exchanges(r['partner']) >= _exchange_limit_count
                         col_a, col_b = st.columns([3, 1])
                         _tlbl2 = mgr.turn_label(user, r['turn'])
                         _tags2 = []
                         if r['has_pending']:
                             _tags2.append('⏳')
-                        if _partner_no_chance2:
-                            _tags2.append('⛔기회소진')
                         col_a.write(f"{icon_r} **{r['partner']}**  {_tlbl2}{'  ' + ' '.join(_tags2) if _tags2 else ''}")
                         col_a.caption(f"나: `{r['my_val']}` → 받을 턴: `{r['partner_val']}`")
                         if r['reasons']:
                             col_a.caption(f"⚠️ {' / '.join(r['reasons'])}")
-                        if r['valid'] and not r['has_pending'] and not _partner_no_chance2:
+                        if r['valid'] and not r['has_pending']:
                             if col_b.button("요청", key=f"sbsim2_{r['partner']}_{r['turn']}", type="primary"):
                                 st.session_state.quick_confirm = {
                                     'receiver': r['partner'], 'turn': r['turn'],
@@ -3096,8 +2897,6 @@ with st.sidebar:
                                 st.rerun()
                         elif r['has_pending']:
                             col_b.caption("⏳")
-                        elif _partner_no_chance2:
-                            col_b.caption("⛔")
 
     else:  # 🔗 복합 교환 탐색
         st.caption("단독 교환이 안 되는 경우, 여러 턴을 동시에 교환하는 조합을 찾습니다.")
@@ -3287,20 +3086,8 @@ if not others or not avail_turns:
     st.info("교환 가능한 상대방 또는 턴이 없습니다.")
     st.stop()
 
-# ── 교환 횟수 제한 상태 표시 ──
-_my_exchange_count = mgr.count_accepted_exchanges(user) if user else 0
-_exchange_remaining = max(0, _exchange_limit_count - _my_exchange_count) if _exchange_limit_active else None
-
-if _exchange_limit_active:
-    if _exchange_remaining > 0:
-        st.info(f"🔄 교환 기회: **{_exchange_remaining}회 남음** (총 {_exchange_limit_count}회 중 {_my_exchange_count}회 사용)")
-    else:
-        st.error(f"⛔ 교환 기회를 모두 사용했습니다. ({_my_exchange_count}/{_exchange_limit_count}회)")
-
-_exchange_exhausted = _exchange_limit_active and _exchange_remaining is not None and _exchange_remaining <= 0
-
 # 항목이 없으면 기본값 1개 추가
-if not _exchange_exhausted and not st.session_state.exchange_items and others and avail_turns:
+if not st.session_state.exchange_items and others and avail_turns:
     st.session_state.exchange_items.append({
         'id': st.session_state.ei_counter,
         'target': others[0],
@@ -3308,11 +3095,8 @@ if not _exchange_exhausted and not st.session_state.exchange_items and others an
     })
     st.session_state.ei_counter += 1
 
-# 각 항목 렌더링 (교환 기회 소진 시 숨김)
-if _exchange_exhausted:
-    others = others  # others 변수는 스케줄 표시에서도 사용하므로 유지
 to_remove = []
-for i, item in enumerate(st.session_state.exchange_items if not _exchange_exhausted else []):
+for i, item in enumerate(st.session_state.exchange_items):
     iid = item['id']
     num_label = '①②③④⑤'[i] if i < 5 else f'{i+1}.'
     t_default    = item.get('target', others[0])    if others      else ''
@@ -3324,15 +3108,7 @@ for i, item in enumerate(st.session_state.exchange_items if not _exchange_exhaus
     c1, c2, c4 = st.columns([2, 1.5, 0.5])
     with c1:
         _ei_t_key = f'ei_t_{iid}'
-        # 상대방 이름에 교환 기회 표시
-        if _exchange_limit_active:
-            _others_labels = []
-            for _o in others:
-                _o_rem = _exchange_limit_count - mgr.count_accepted_exchanges(_o)
-                _o_tag = f"⛔" if _o_rem <= 0 else f"🔄{_o_rem}"
-                _others_labels.append(f"{_o}  {_o_tag}")
-        else:
-            _others_labels = others
+        _others_labels = others
         _ei_t_kwargs = {"key": _ei_t_key,
                         "format_func": lambda idx, _lb=_others_labels: _lb[idx]}
         if _ei_t_key not in st.session_state:
@@ -3377,10 +3153,6 @@ for i, item in enumerate(st.session_state.exchange_items if not _exchange_exhaus
             if st.button("✕", key=f'ei_rm_{iid}', help="항목 제거", use_container_width=True):
                 to_remove.append(i)
     st.caption(f"나: `{my_v}` ↔ **{sel_t}**: `{pt_v}`{_ei_pvac_str}")
-    if _exchange_limit_active:
-        _sel_t_rem = _exchange_limit_count - mgr.count_accepted_exchanges(sel_t)
-        if _sel_t_rem <= 0:
-            st.warning(f"⛔ **{sel_t}**의 교환 기회가 소진되어 교환 신청이 불가합니다.")
 
 for idx in reversed(to_remove):
     st.session_state.exchange_items.pop(idx)
@@ -3389,7 +3161,7 @@ if to_remove:
 
 # 합산 검증 표시
 can_send = False
-if not _exchange_exhausted and st.session_state.exchange_items:
+if st.session_state.exchange_items:
     exchanges = [{'target': it['target'], 'turn': it['turn']}
                  for it in st.session_state.exchange_items]
     can_send, errs = mgr.validate_multi_exchange(user, exchanges)
@@ -3407,20 +3179,18 @@ if not _exchange_exhausted and st.session_state.exchange_items:
         st.error("⚠️ 조건 불충족: " + " / ".join(errs))
 
         # ── 항목 추가 + 가능한 조합 탐색 (한 줄 배치) ────────────────────────
-        _hide_multi = _exchange_limit_active and _exchange_limit_count <= 1
         _do_find_combo = False
-        if not _hide_multi:
-            _ca, _cb = st.columns(2)
-            if _ca.button("➕ 항목 추가", key="ei_add_err", use_container_width=True):
-                if others and avail_turns:
-                    st.session_state.exchange_items.append({
-                        'id': st.session_state.ei_counter,
-                        'target': others[0],
-                        'turn': avail_turns[0]
-                    })
-                    st.session_state.ei_counter += 1
-                    st.rerun()
-            _do_find_combo = _cb.button("🔍 가능한 조합 찾기", key="btn_find_combo", use_container_width=True)
+        _ca, _cb = st.columns(2)
+        if _ca.button("➕ 항목 추가", key="ei_add_err", use_container_width=True):
+            if others and avail_turns:
+                st.session_state.exchange_items.append({
+                    'id': st.session_state.ei_counter,
+                    'target': others[0],
+                    'turn': avail_turns[0]
+                })
+                st.session_state.ei_counter += 1
+                st.rerun()
+        _do_find_combo = _cb.button("🔍 가능한 조합 찾기", key="btn_find_combo", use_container_width=True)
         if _do_find_combo:
             with st.spinner("가능한 조합 탐색 중... (잠시 기다려주세요)"):
                 mandatory = [{'target': it['target'], 'turn': it['turn']}
@@ -3497,24 +3267,19 @@ if not _exchange_exhausted and st.session_state.exchange_items:
                         st.rerun()
                     st.divider()
 
-if not _exchange_exhausted:
-    if _exchange_limit_active and _exchange_limit_count <= 1:
-        # 1회 제한 모드: 항목 추가 버튼 숨김, 요청 버튼만 표시
-        col_send = st.columns(1)[0]
-    else:
-        col_add, col_send = st.columns([1, 3])
-        if col_add.button("➕ 항목 추가", key="ei_add", disabled=not can_send):
-            if others and avail_turns:
-                st.session_state.exchange_items.append({
-                    'id': st.session_state.ei_counter,
-                    'target': others[0],
-                    'turn': avail_turns[0]
-                })
-                st.session_state.ei_counter += 1
-                st.rerun()
+col_add, col_send = st.columns([1, 3])
+if col_add.button("➕ 항목 추가", key="ei_add", disabled=not can_send):
+    if others and avail_turns:
+        st.session_state.exchange_items.append({
+            'id': st.session_state.ei_counter,
+            'target': others[0],
+            'turn': avail_turns[0]
+        })
+        st.session_state.ei_counter += 1
+        st.rerun()
 
-    if col_send.button("📨 요청 보내기", type="primary", use_container_width=True,
-                       disabled=not can_send):
+if col_send.button("📨 요청 보내기", type="primary", use_container_width=True,
+                   disabled=not can_send):
         confirm_items = []
         for it in st.session_state.exchange_items:
             mv = mgr.df.loc[user,       it['turn']] if user         in mgr.df.index else '?'
@@ -3560,23 +3325,11 @@ def style_table(row):
         styles.append(s)
     return styles
 
-_schedule_display = display_df.copy()
-if _exchange_limit_active:
-    _ex_status = []
-    for _nm in _schedule_display.index:
-        _cnt = mgr.count_accepted_exchanges(_nm)
-        _rem = max(0, _exchange_limit_count - _cnt)
-        _ex_status.append('⛔' if _rem == 0 else f'🔄{_rem}')
-    _schedule_display.insert(0, '교환', _ex_status)
-
 st.dataframe(
-    _schedule_display.style.apply(
-        lambda row: style_table(row) if '교환' not in row.index
-        else [''] + style_table(row.drop('교환')),
-        axis=1),
+    display_df.style.apply(style_table, axis=1),
     use_container_width=True, height=500
 )
-st.caption("🟪 연보라 음영 = 휴가 턴" + ("  |  🔄 = 교환 가능 횟수, ⛔ = 교환 불가" if _exchange_limit_active else ""))
+st.caption("🟪 연보라 음영 = 휴가 턴")
 
 st.markdown("---")
 
@@ -3596,25 +3349,9 @@ with tab_browse:
     if not others_posts:
         st.info("현재 다른 사람의 교환 요청이 없습니다.")
     else:
-        # 교환 기회 없는 게시자의 글 분리
-        _mkt_available = []
-        _mkt_no_chance = []
-        for _p in others_posts:
-            _poster = _p.get('등록자', '')
-            if _exchange_limit_active and mgr.count_accepted_exchanges(_poster) >= _exchange_limit_count:
-                _mkt_no_chance.append(_p)
-            else:
-                _mkt_available.append(_p)
+        st.caption(f"활성 게시물 {len(others_posts)}건")
 
-        if _mkt_no_chance:
-            st.caption(f"활성 게시물 {len(others_posts)}건 (교환 기회 소진: {len(_mkt_no_chance)}건)")
-        else:
-            st.caption(f"활성 게시물 {len(others_posts)}건")
-
-        # 기회 소진 게시글은 뒤에 배치
-        _mkt_sorted = _mkt_available + _mkt_no_chance
-
-        for post in _mkt_sorted:
+        for post in others_posts:
             poster    = post.get('등록자', '')
             give_turn = post.get('주고싶은턴', '')
             give_val  = post.get('주고싶은값', '')
@@ -3623,17 +3360,9 @@ with tab_browse:
             post_time = post.get('등록시각', '')
             post_id   = post.get('등록ID', '')
 
-            # 게시자 교환 기회 체크
-            _poster_no_chance = False
-            if _exchange_limit_active:
-                _poster_no_chance = mgr.count_accepted_exchanges(poster) >= _exchange_limit_count
-
-            # 나의 교환 기회도 체크
-            _my_no_chance = _exchange_limit_active and _my_exchange_count >= _exchange_limit_count
-
             compatibilities = mgr.get_market_compatibilities(user, post)
             valid_cnt = sum(1 for c in compatibilities if c['valid'])
-            has_valid = valid_cnt > 0 and not _poster_no_chance and not _my_no_chance
+            has_valid = valid_cnt > 0
             if give_turn == '아무턴':
                 turn_label_mkt = '아무 턴'
             elif give_turn:
@@ -3641,8 +3370,8 @@ with tab_browse:
             else:
                 turn_label_mkt = '무관'
 
-            _poster_tag = f" ⛔기회소진" if _poster_no_chance else ""
-            _valid_label = f"✅ {valid_cnt}개 조합" if has_valid else ("⛔ 교환 불가" if _poster_no_chance else "❌ 불가")
+            _poster_tag = ""
+            _valid_label = f"✅ {valid_cnt}개 조합" if has_valid else "❌ 단독 불가 (복합 탐색 가능)"
             with st.expander(
                 f"{'🟢' if has_valid else '🔴'} **{poster}**{_poster_tag} | "
                 f"줄 것: {turn_label_mkt}{(' `'+give_val+'`') if give_val else ''} | "
@@ -3672,9 +3401,7 @@ with tab_browse:
                             if reasons:
                                 st.caption(f"⚠️ {' / '.join(reasons)}")
                         with col_b:
-                            if _poster_no_chance or _my_no_chance:
-                                st.caption("⛔")
-                            elif is_valid and not has_pend:
+                            if is_valid and not has_pend:
                                 if st.button("요청", key=f"mkt_{post_id}_{t}", type="primary"):
                                     my_v_here = (mgr.df.loc[user, t]
                                                  if user in mgr.df.index and t in mgr.df.columns else '')
@@ -3686,14 +3413,13 @@ with tab_browse:
                             elif has_pend:
                                 st.caption("⏳")
                             elif not is_valid:
-                                if not _exchange_limit_active or _exchange_limit_count > 1:
-                                    if st.button("🔍", key=f"mktc_{mkt_key}",
-                                                 help="복합 교환으로 가능한 조합 탐색"):
-                                        with st.spinner("복합 조합 탐색 중..."):
-                                            mandatory = [{'target': poster, 'turn': t}]
-                                            found = mgr.find_completing_combos(user, mandatory, max_additional=2)
-                                        st.session_state.mkt_combos[mkt_key] = found
-                                        st.rerun()
+                                if st.button("🔍", key=f"mktc_{mkt_key}",
+                                             help="복합 교환으로 가능한 조합 탐색"):
+                                    with st.spinner("복합 조합 탐색 중..."):
+                                        mandatory = [{'target': poster, 'turn': t}]
+                                        found = mgr.find_completing_combos(user, mandatory, max_additional=2)
+                                    st.session_state.mkt_combos[mkt_key] = found
+                                    st.rerun()
 
                         # 복합 탐색 결과 표시
                         mkt_result = st.session_state.mkt_combos.get(mkt_key)
@@ -3730,9 +3456,6 @@ with tab_browse:
 # ── 장터: 내 턴 올리기 ──────────────────────────────────────────────────────
 with tab_post:
     st.write("#### 교환 요청 올리기")
-    _mkt_post_blocked = _exchange_limit_active and _my_exchange_count >= _exchange_limit_count
-    if _mkt_post_blocked:
-        st.error(f"⛔ 교환 기회를 모두 사용하여 장터 등록이 불가합니다. ({_my_exchange_count}/{_exchange_limit_count})")
     fv = st.session_state.mkt_form_version
     # 등록 성공 메시지 (폼 리셋 후 표시)
     if st.session_state.mkt_post_success:
@@ -3805,7 +3528,7 @@ with tab_post:
         key=f"mkt_msg_inp_{fv}", max_chars=100
     )
     if st.button("📌 장터에 등록", type="primary", key=f"btn_mkt_post_{fv}",
-                 disabled=not can_post or _mkt_post_blocked):
+                 disabled=not can_post):
         ok, msg = mgr.add_market_post(user, give_turn_k, give_val_k, want_str_k, p_msg)
         if ok:
             st.session_state.mkt_post_success = '장터에 등록되었습니다! 🎉'
