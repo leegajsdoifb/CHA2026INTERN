@@ -455,15 +455,13 @@ class TestValidateMultiExchange(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_vacation_balanced_ok(self):
-        """A↔B: 4턴(A 휴가) + 5턴(B 휴가) → 균형 OK."""
+        """A↔B: 3턴 + 7턴 교환 → 필수과목 유지 OK."""
+        # A:3턴=OB, B:3턴=IM / A:7턴=GS, B:7턴=OB (진로탐색 아닌 턴)
         exs = [
-            {'target': 'B', 'turn': '4턴'},
-            {'target': 'B', 'turn': '5턴'},
+            {'target': 'B', 'turn': '3턴'},
+            {'target': 'B', 'turn': '7턴'},
         ]
         ok, errs = self.dm.validate_multi_exchange('A', exs)
-        # 필수과목도 확인해야 함
-        # 결과는 필수과목 유지 여부에 따라 다를 수 있음
-        # A: 4턴 PE→진로탐색, 5턴 진로탐색→PE → 동일 값 swap → OK
         self.assertTrue(ok, f"Expected valid but got: {errs}")
 
     def test_bundang_violation_detected(self):
@@ -564,10 +562,10 @@ class TestAddChainRequest(unittest.TestCase):
         self.assertEqual(len(chain_reqs), 2)
 
     def test_vacation_balanced_chain_succeeds(self):
-        """A↔B: 4턴(A 휴가) + 5턴(B 휴가) → 균형 OK."""
+        """A↔B: 3턴 + 7턴 교환 → 필수과목 유지 OK."""
         swaps = [
-            {'receiver': 'B', 'turn': '4턴'},
-            {'receiver': 'B', 'turn': '5턴'},
+            {'receiver': 'B', 'turn': '3턴'},
+            {'receiver': 'B', 'turn': '7턴'},
         ]
         ok, msg = self.dm.add_chain_request('A', swaps)
         self.assertTrue(ok, f"Expected success but got: {msg}")
@@ -1522,16 +1520,15 @@ class TestAdminBlockJinroSontaek(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('진로선택', msg)
 
-    def test_jinro_tamsaek_not_blocked(self):
-        """진로탐색은 차단 대상이 아님 (진로선택만 차단)."""
+    def test_jinro_tamsaek_also_blocked(self):
+        """진로탐색도 교환 차단 대상."""
         sched = copy.deepcopy(BASE_SCHEDULE)
         sched['A']['3턴'] = '진로탐색'
         sched['B']['3턴'] = 'OB'
-        dm2 = make_dm(schedule=sched)
-        ok, _ = dm2.add_request('A', 'B', '3턴')
-        # 진로탐색은 차단 안 됨 (필수과목 규칙에 의해 막힐 수는 있음)
-        # 여기서는 진로선택 차단 로직이 동작하지 않는지만 확인
-        self.assertIsInstance(ok, bool)  # 진로선택 차단은 아님
+        dm = make_dm(schedule=sched)
+        ok, msg = dm.add_request('A', 'B', '3턴')
+        self.assertFalse(ok)
+        self.assertIn('진로탐색', msg)
 
 
 if __name__ == '__main__':

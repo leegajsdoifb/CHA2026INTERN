@@ -847,8 +847,8 @@ class DataManager:
             # ── 진로선택 교환 절대 불가 ──
             loc_a, dept_a = self.parse_cell(val_a)
             loc_b, dept_b = self.parse_cell(val_b)
-            if dept_a == '진로선택' or dept_b == '진로선택':
-                return False, f"⛔ {turn}: 진로선택은 교환이 불가능합니다."
+            if dept_a in ('진로선택', '진로탐색') or dept_b in ('진로선택', '진로탐색'):
+                return False, f"⛔ {turn}: {dept_a if dept_a in ('진로선택','진로탐색') else dept_b}은(는) 교환이 불가능합니다."
 
             # 중복 체크
             for req in self.requests:
@@ -1645,11 +1645,12 @@ class DataManager:
             u_val = temp[sender][turn]
             t_val = temp[target][turn]
 
-            # 진로선택 교환 절대 불가
+            # 진로선택/진로탐색 교환 절대 불가
             _, dept_u = self.parse_cell(u_val)
             _, dept_t = self.parse_cell(t_val)
-            if dept_u == '진로선택' or dept_t == '진로선택':
-                errors.append(f"⛔ {turn}: 진로선택은 교환이 불가능합니다.")
+            if dept_u in ('진로선택', '진로탐색') or dept_t in ('진로선택', '진로탐색'):
+                blocked = dept_u if dept_u in ('진로선택','진로탐색') else dept_t
+                errors.append(f"⛔ {turn}: {blocked}은(는) 교환이 불가능합니다.")
                 continue
 
             if u_val == t_val:
@@ -1703,11 +1704,12 @@ class DataManager:
         val_a = self.df.loc[sender, turn]
         val_b = self.df.loc[receiver, turn]
 
-        # ── 진로선택 교환 절대 불가 ──
+        # ── 진로선택/진로탐색 교환 절대 불가 ──
         loc_a, dept_a = self.parse_cell(val_a)
         loc_b, dept_b = self.parse_cell(val_b)
-        if dept_a == '진로선택' or dept_b == '진로선택':
-            return False, "⛔ 진로선택은 교환이 불가능합니다."
+        if dept_a in ('진로선택', '진로탐색') or dept_b in ('진로선택', '진로탐색'):
+            blocked = dept_a if dept_a in ('진로선택','진로탐색') else dept_b
+            return False, f"⛔ {blocked}은(는) 교환이 불가능합니다."
         if val_a == val_b:
             return False, "두 사람의 해당 턴 스케줄이 이미 동일합니다."
 
@@ -2526,9 +2528,9 @@ if user == 'ADMIN':
 
         st.divider()
 
-        # ── 진로선택 교환 불가 (항상 활성) ──
-        st.markdown("#### 진로선택 교환 불가")
-        st.info("🔒 진로선택 과목은 **항상** 교환이 차단됩니다. (변경 불가)")
+        # ── 진로선택/진로탐색 교환 불가 (항상 활성) ──
+        st.markdown("#### 진로선택 · 진로탐색 교환 불가")
+        st.info("🔒 진로선택 · 진로탐색 과목은 **항상** 교환이 차단됩니다. (변경 불가)")
 
         st.divider()
 
@@ -2905,7 +2907,8 @@ with st.sidebar:
         all_sv_chain = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
-            if v and str(v).strip() not in ('None', '', '예비턴')
+            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택', '진로탐색')
+            and '진로선택' not in str(v) and '진로탐색' not in str(v)
         )) if not mgr.df.empty else []
         want_depts_chain = st.multiselect(
             "받고 싶은 값", all_sv_chain,
@@ -2914,7 +2917,10 @@ with st.sidebar:
         )
 
         st.markdown("**② 교환 가능한 턴 선택**")
-        avail_t_chain = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
+        avail_t_chain = [c for c in mgr.df.columns if c not in LOCKED_TURNS
+                         and (user not in mgr.df.index
+                              or ('진로선택' not in str(mgr.df.loc[user, c])
+                                  and '진로탐색' not in str(mgr.df.loc[user, c])))]
         chain_turns = st.multiselect(
             "내가 내줄 수 있는 턴", avail_t_chain,
             key="chain_turn_sel",
@@ -3078,7 +3084,8 @@ avail_turns = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
 # 진로선택 턴 제외: 사용자의 해당 턴 값에 '진로선택'이 포함된 턴은 교환 불가
 if user in mgr.df.index:
     avail_turns = [c for c in avail_turns
-                   if '진로선택' not in str(mgr.df.loc[user, c])]
+                   if '진로선택' not in str(mgr.df.loc[user, c])
+                   and '진로탐색' not in str(mgr.df.loc[user, c])]
 others = [u for u in mgr.df.index if u != user]
 
 if not others or not avail_turns:
@@ -3495,8 +3502,8 @@ with tab_post:
         all_vals_want = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
-            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택')
-            and '진로선택' not in str(v)
+            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택', '진로탐색')
+            and '진로선택' not in str(v) and '진로탐색' not in str(v)
         )) if not mgr.df.empty else []
         p_want = st.multiselect("받고싶은 과목 (선택하지 않으면 무관)", all_vals_want,
                                 key=f"mkt_want_sel_{fv}")
@@ -3507,8 +3514,8 @@ with tab_post:
         all_vals_want2 = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
-            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택')
-            and '진로선택' not in str(v)
+            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택', '진로탐색')
+            and '진로선택' not in str(v) and '진로탐색' not in str(v)
         )) if not mgr.df.empty else []
         sel_want_vals = st.multiselect(
             "받고 싶은 과목 (복수 선택 가능, 예: IM, ANE)",
