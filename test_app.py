@@ -1493,33 +1493,22 @@ class TestSimulateMultiSwapAdvanced(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class TestAdminBlockJinroSontaek(unittest.TestCase):
-    """진로선택 교환 차단 테스트."""
+    """진로선택 교환 차단 테스트 (항상 차단, 설정 불필요)."""
 
-    def test_block_disabled_allows_jinro(self):
-        """차단 비활성화 시 진로선택 교환 가능."""
+    def test_always_blocks_sender_jinro(self):
+        """sender의 진로선택 교환 항상 차단."""
         sched = copy.deepcopy(BASE_SCHEDULE)
         sched['A']['3턴'] = '진로선택'
         dm = make_dm(schedule=sched)
-        dm.admin_settings['block_jinro_sontaek'] = False
-        ok, _ = dm.add_request('A', 'B', '3턴')
-        self.assertTrue(ok)
-
-    def test_block_enabled_blocks_sender_jinro(self):
-        """차단 활성화 시 sender의 진로선택 교환 차단."""
-        sched = copy.deepcopy(BASE_SCHEDULE)
-        sched['A']['3턴'] = '진로선택'
-        dm = make_dm(schedule=sched)
-        dm.admin_settings['block_jinro_sontaek'] = True
         ok, msg = dm.add_request('A', 'B', '3턴')
         self.assertFalse(ok)
         self.assertIn('진로선택', msg)
 
-    def test_block_enabled_blocks_receiver_jinro(self):
-        """차단 활성화 시 receiver의 진로선택도 차단."""
+    def test_always_blocks_receiver_jinro(self):
+        """receiver의 진로선택도 항상 차단."""
         sched = copy.deepcopy(BASE_SCHEDULE)
         sched['B']['3턴'] = '진로선택'
         dm = make_dm(schedule=sched)
-        dm.admin_settings['block_jinro_sontaek'] = True
         ok, msg = dm.add_request('A', 'B', '3턴')
         self.assertFalse(ok)
         self.assertIn('진로선택', msg)
@@ -1529,22 +1518,16 @@ class TestAdminBlockJinroSontaek(unittest.TestCase):
         sched = copy.deepcopy(BASE_SCHEDULE)
         sched['B']['3턴'] = '진로선택'
         dm = make_dm(schedule=sched)
-        dm.admin_settings['block_jinro_sontaek'] = True
         ok, msg = dm.add_chain_request('A', [{'receiver': 'B', 'turn': '3턴'}])
         self.assertFalse(ok)
         self.assertIn('진로선택', msg)
 
     def test_jinro_tamsaek_not_blocked(self):
         """진로탐색은 차단 대상이 아님 (진로선택만 차단)."""
-        dm = make_dm()  # BASE_SCHEDULE has 진로탐색 at turns
-        dm.admin_settings['block_jinro_sontaek'] = True
-        # A:13턴=진로탐색, B:13턴=진로탐색 → 동일값이라 교환 불가지만
-        # 진로탐색이 있는 턴을 찾아서 확인
         sched = copy.deepcopy(BASE_SCHEDULE)
         sched['A']['3턴'] = '진로탐색'
         sched['B']['3턴'] = 'OB'
         dm2 = make_dm(schedule=sched)
-        dm2.admin_settings['block_jinro_sontaek'] = True
         ok, _ = dm2.add_request('A', 'B', '3턴')
         # 진로탐색은 차단 안 됨 (필수과목 규칙에 의해 막힐 수는 있음)
         # 여기서는 진로선택 차단 로직이 동작하지 않는지만 확인

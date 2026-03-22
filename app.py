@@ -61,9 +61,7 @@ class DataManager:
         self.passwords   = {}
         self.market_posts = []
         self.vacation_data = {}   # {이름: {'1차': {'turn':X,'type':Y}, '2차': {'turn':X,'type':Y}}}
-        self.admin_settings = {
-            'block_jinro_sontaek': False,      # 진로선택 교환 불가 ON/OFF
-        }
+        self.admin_settings = {}  # 관리자 설정 (진로선택 차단은 하드코딩)
         self.connect_google_sheet()
         self.load_db()
 
@@ -846,12 +844,11 @@ class DataManager:
             if val_a == val_b:
                 return False, f"{turn}: 이미 동일한 스케줄입니다."
 
-            # ── 관리자 설정: 진로선택 교환 불가 ──
-            if self.admin_settings.get('block_jinro_sontaek'):
-                loc_a, dept_a = self.parse_cell(val_a)
-                loc_b, dept_b = self.parse_cell(val_b)
-                if dept_a == '진로선택' or dept_b == '진로선택':
-                    return False, f"⛔ {turn}: 진로선택은 교환이 불가능합니다."
+            # ── 진로선택 교환 절대 불가 ──
+            loc_a, dept_a = self.parse_cell(val_a)
+            loc_b, dept_b = self.parse_cell(val_b)
+            if dept_a == '진로선택' or dept_b == '진로선택':
+                return False, f"⛔ {turn}: 진로선택은 교환이 불가능합니다."
 
             # 중복 체크
             for req in self.requests:
@@ -1378,7 +1375,10 @@ class DataManager:
                         self.requests     = db.get('requests', [])
                         self.vacation_data = sheet_vac if sheet_vac else db.get('vacation_data', {})
                         saved_settings = db.get('admin_settings', {})
-                        self.admin_settings.update(saved_settings)
+                        # 현재 유효한 키만 로드 (옛 설정 무시)
+                        for k in list(self.admin_settings.keys()):
+                            if k in saved_settings:
+                                self.admin_settings[k] = saved_settings[k]
                 except Exception as e:
                     print(f"[ERROR] DB_FILE load failed: {e}")
                     self.requests     = []
@@ -1394,7 +1394,9 @@ class DataManager:
                     self.requests      = db.get('requests', [])
                     self.vacation_data = sheet_vac if sheet_vac else db.get('vacation_data', {})
                     saved_settings = db.get('admin_settings', {})
-                    self.admin_settings.update(saved_settings)
+                    for k in list(self.admin_settings.keys()):
+                        if k in saved_settings:
+                            self.admin_settings[k] = saved_settings[k]
             else:
                 self.df            = pd.DataFrame()
                 self.requests      = []
@@ -1642,6 +1644,14 @@ class DataManager:
 
             u_val = temp[sender][turn]
             t_val = temp[target][turn]
+
+            # 진로선택 교환 절대 불가
+            _, dept_u = self.parse_cell(u_val)
+            _, dept_t = self.parse_cell(t_val)
+            if dept_u == '진로선택' or dept_t == '진로선택':
+                errors.append(f"⛔ {turn}: 진로선택은 교환이 불가능합니다.")
+                continue
+
             if u_val == t_val:
                 errors.append(f"{turn}: 나와 **{target}**의 스케줄이 동일합니다.")
                 continue
@@ -1693,12 +1703,11 @@ class DataManager:
         val_a = self.df.loc[sender, turn]
         val_b = self.df.loc[receiver, turn]
 
-        # ── 관리자 설정: 진로선택 교환 불가 ──
-        if self.admin_settings.get('block_jinro_sontaek'):
-            loc_a, dept_a = self.parse_cell(val_a)
-            loc_b, dept_b = self.parse_cell(val_b)
-            if dept_a == '진로선택' or dept_b == '진로선택':
-                return False, "⛔ 진로선택은 교환이 불가능합니다."
+        # ── 진로선택 교환 절대 불가 ──
+        loc_a, dept_a = self.parse_cell(val_a)
+        loc_b, dept_b = self.parse_cell(val_b)
+        if dept_a == '진로선택' or dept_b == '진로선택':
+            return False, "⛔ 진로선택은 교환이 불가능합니다."
         if val_a == val_b:
             return False, "두 사람의 해당 턴 스케줄이 이미 동일합니다."
 
@@ -2513,29 +2522,15 @@ if user == 'ADMIN':
     # ── 관리자 탭8: 교환 설정 ────────────────────────────────────────────────
     with adm_tab8:
         st.subheader("⚙️ 교환 규칙 설정")
-        st.caption("교환 시스템의 추가 제한 규칙을 ON/OFF 할 수 있습니다.")
+        st.caption("교환 시스템의 규칙을 확인할 수 있습니다.")
 
         st.divider()
 
-        # ── 진로선택 교환 불가 ──
+        # ── 진로선택 교환 불가 (항상 활성) ──
         st.markdown("#### 진로선택 교환 불가")
-        block_jinro = st.toggle(
-            "진로선택 과목 교환 차단",
-            value=mgr.admin_settings.get('block_jinro_sontaek', False),
-            key="adm_block_jinro_toggle",
-            help="활성화하면 '진로선택' 과목이 포함된 턴의 교환을 차단합니다."
-        )
-        if block_jinro:
-            st.info("진로선택 과목이 포함된 교환은 **자동 차단**됩니다.")
+        st.info("🔒 진로선택 과목은 **항상** 교환이 차단됩니다. (변경 불가)")
 
         st.divider()
-
-        # ── 설정 저장 버튼 ──
-        if st.button("💾 설정 저장", type="primary", use_container_width=True, key="adm_save_settings"):
-            mgr.admin_settings['block_jinro_sontaek'] = block_jinro
-            mgr.save_db()
-            st.success("✅ 설정이 저장되었습니다.")
-            st.rerun()
 
     st.stop()
 
@@ -3080,6 +3075,10 @@ elif st.session_state.multi_confirm is not None:
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("📤 교환 신청")
 avail_turns = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
+# 진로선택 턴 제외: 사용자의 해당 턴 값에 '진로선택'이 포함된 턴은 교환 불가
+if user in mgr.df.index:
+    avail_turns = [c for c in avail_turns
+                   if '진로선택' not in str(mgr.df.loc[user, c])]
 others = [u for u in mgr.df.index if u != user]
 
 if not others or not avail_turns:
@@ -3462,7 +3461,8 @@ with tab_post:
         st.success(st.session_state.mkt_post_success)
         st.session_state.mkt_post_success = ''
 
-    all_turns_p = [c for c in mgr.df.columns if c not in LOCKED_TURNS] if not mgr.df.empty else []
+    all_turns_p = [c for c in mgr.df.columns if c not in LOCKED_TURNS
+                   and (user not in mgr.df.index or '진로선택' not in str(mgr.df.loc[user, c]))] if not mgr.df.empty else []
 
     give_mode = st.radio(
         "등록 방식",
@@ -3495,7 +3495,8 @@ with tab_post:
         all_vals_want = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
-            if v and str(v).strip() not in ('None', '', '예비턴')
+            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택')
+            and '진로선택' not in str(v)
         )) if not mgr.df.empty else []
         p_want = st.multiselect("받고싶은 과목 (선택하지 않으면 무관)", all_vals_want,
                                 key=f"mkt_want_sel_{fv}")
@@ -3506,7 +3507,8 @@ with tab_post:
         all_vals_want2 = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
-            if v and str(v).strip() not in ('None', '', '예비턴')
+            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택')
+            and '진로선택' not in str(v)
         )) if not mgr.df.empty else []
         sel_want_vals = st.multiselect(
             "받고 싶은 과목 (복수 선택 가능, 예: IM, ANE)",
