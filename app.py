@@ -458,12 +458,17 @@ class DataManager:
         want_dept_vals  = set(want_raw) if not want_is_turns else set()  # 받고싶은 과목값
 
         # 후보 턴 목록
+        # give_turn이 콤마 구분 복수 턴일 수 있음 (예: '3턴, 7턴')
+        give_turn_list = [g.strip() for g in str(give_turn).split(',') if g.strip()] if give_turn else []
+        give_is_multi = len(give_turn_list) > 1  # 콤마로 구분된 복수 턴
+
         if give_turn == '아무턴':
             if want_is_turns:
-                # 받을 턴 지정 모드: want_turn_names가 후보
                 candidate_turns = [t for t in want_turn_names if t in self.df.columns]
             else:
                 candidate_turns = list(self.df.columns)
+        elif give_is_multi:
+            candidate_turns = [t for t in give_turn_list if t in self.df.columns]
         elif give_turn in self.df.columns:
             candidate_turns = [give_turn]
         else:
@@ -1078,18 +1083,30 @@ class DataManager:
                 self.df = fresh_df
 
             # 재검증: 동시에 모든 교환이 이뤄질 때 유효한지 (필수과목+분당+휴가)
+            if sender not in self.df.index:
+                return False, f"⛔ {sender}을(를) 찾을 수 없습니다."
             sa = self.df.loc[sender].copy()
             for r in chain_reqs:
-                val_b = self.df.loc[r['receiver'], r['turn']] if r['receiver'] in self.df.index else r['val_receiver']
-                sa[r['turn']] = val_b
+                _turn = r['turn']
+                if r['receiver'] in self.df.index and _turn in self.df.columns:
+                    val_b = self.df.loc[r['receiver'], _turn]
+                else:
+                    val_b = r.get('val_receiver', '')
+                sa[_turn] = val_b
             v_me, m_me = self.validate_intern(sender, sa)
 
             partner_scheds = {}
             for r in chain_reqs:
+                _turn = r['turn']
+                if r['receiver'] not in self.df.index:
+                    continue
                 if r['receiver'] not in partner_scheds:
                     partner_scheds[r['receiver']] = self.df.loc[r['receiver']].copy()
-                val_a = self.df.loc[sender, r['turn']] if sender in self.df.index else r['val_sender']
-                partner_scheds[r['receiver']][r['turn']] = val_a
+                if sender in self.df.index and _turn in self.df.columns:
+                    val_a = self.df.loc[sender, _turn]
+                else:
+                    val_a = r.get('val_sender', '')
+                partner_scheds[r['receiver']][_turn] = val_a
 
             all_valid = v_me
             fail_msgs = []
@@ -1132,8 +1149,11 @@ class DataManager:
             # 일괄 실행
             sheet_ok = True
             for r in chain_reqs:
-                val_a = self.df.loc[sender, r['turn']]
-                val_b = self.df.loc[r['receiver'], r['turn']]
+                _turn = r['turn']
+                if sender not in self.df.index or r['receiver'] not in self.df.index or _turn not in self.df.columns:
+                    continue
+                val_a = self.df.loc[sender, _turn]
+                val_b = self.df.loc[r['receiver'], _turn]
                 self.df.loc[sender, r['turn']] = val_b
                 self.df.loc[r['receiver'], r['turn']] = val_a
                 # 휴가 시트 동기화
@@ -2362,7 +2382,7 @@ if user == 'ADMIN':
                 default=['활성'], key="adm_mkt_filter"
             )
             if status_filter:
-                filtered_posts = posts_df[posts_df.get('상태', pd.Series()).isin(status_filter)]
+                filtered_posts = posts_df[posts_df['상태'].isin(status_filter)] if '상태' in posts_df.columns else posts_df
             else:
                 filtered_posts = posts_df
             st.dataframe(filtered_posts, use_container_width=True, hide_index=True, height=400)
@@ -2504,16 +2524,16 @@ if user == 'ADMIN':
             name_filter = f2.text_input("이름 검색", key="adm_login_name", placeholder="이름 입력")
 
             filtered = log_df.copy()
-            if result_filter != "전체":
-                filtered = filtered[filtered.get('결과', pd.Series()) == result_filter]
-            if name_filter.strip():
-                filtered = filtered[filtered.get('이름', pd.Series()).str.contains(name_filter.strip(), na=False)]
+            if result_filter != "전체" and '결과' in filtered.columns:
+                filtered = filtered[filtered['결과'] == result_filter]
+            if name_filter.strip() and '이름' in filtered.columns:
+                filtered = filtered[filtered['이름'].str.contains(name_filter.strip(), na=False)]
 
             # 요약 메트릭
             m1, m2, m3 = st.columns(3)
             total_logs = len(log_df)
-            success_count = len(log_df[log_df.get('결과', pd.Series()) == '성공'])
-            fail_count = len(log_df[log_df.get('결과', pd.Series()) == '실패'])
+            success_count = len(log_df[log_df['결과'] == '성공']) if '결과' in log_df.columns else 0
+            fail_count = len(log_df[log_df['결과'] == '실패']) if '결과' in log_df.columns else 0
             m1.metric("전체 시도", total_logs)
             m2.metric("성공", success_count)
             m3.metric("실패", fail_count)
@@ -3371,6 +3391,9 @@ with tab_browse:
             has_valid = valid_cnt > 0
             if give_turn == '아무턴':
                 turn_label_mkt = '아무 턴'
+            elif ',' in str(give_turn):
+                # 복수 턴: "3턴, 7턴" → "3턴·7턴"
+                turn_label_mkt = '·'.join(t.strip() for t in str(give_turn).split(',') if t.strip())
             elif give_turn:
                 turn_label_mkt = mgr.turn_label(poster, give_turn)
             else:
@@ -3526,22 +3549,31 @@ with tab_post:
             help="선택한 과목 중 하나라도 갖고 있는 사람의 교환 신청을 받을 수 있습니다. 선택하지 않으면 무관"
         )
 
-        # 내가 교환해줄 턴 선택 (아무턴 or 특정 턴)
-        my_turns_for_give = ['아무턴'] + all_turns_p
-        sel_give_turn_recv = st.selectbox(
-            "내가 교환해줄 턴",
-            my_turns_for_give,
-            key=f"mkt_recv_give_turn_{fv}",
-            help="'아무턴'이면 모든 턴 대상으로 등록됩니다. 특정 턴을 선택하면 해당 턴만 교환 대상으로 올립니다."
+        # 내가 교환해줄 턴 선택 (복수 선택 가능, 비워두면 아무턴)
+        sel_give_turns_recv = st.multiselect(
+            "내가 교환해줄 턴 (비워두면 아무 턴)",
+            all_turns_p,
+            key=f"mkt_recv_give_turns_{fv}",
+            help="비워두면 모든 턴 대상으로 등록됩니다. 특정 턴을 선택하면 해당 턴만 교환 대상으로 올립니다."
         )
 
-        if sel_give_turn_recv == '아무턴':
+        if not sel_give_turns_recv:
             give_turn_k = '아무턴'
             give_val_k  = ''
-        else:
-            give_turn_k = sel_give_turn_recv
+        elif len(sel_give_turns_recv) == 1:
+            give_turn_k = sel_give_turns_recv[0]
             give_val_k  = str(mgr.df.loc[user, give_turn_k]) if user in mgr.df.index and give_turn_k in mgr.df.columns else ''
             st.write(f"📌 내 {give_turn_k} 현재 값: **`{give_val_k}`**")
+        else:
+            give_turn_k = ', '.join(sel_give_turns_recv)
+            give_vals_display = []
+            give_vals_data = []
+            for _gt in sel_give_turns_recv:
+                _gv = str(mgr.df.loc[user, _gt]) if user in mgr.df.index and _gt in mgr.df.columns else ''
+                give_vals_display.append(f"{_gt}(`{_gv or '?'}`)")
+                give_vals_data.append(_gv)
+            give_val_k = ', '.join(give_vals_data)
+            st.write("📌 내 턴 현재 값: " + " / ".join(give_vals_display))
 
         want_str_k  = ', '.join(sel_want_vals) if sel_want_vals else '무관'
         if sel_want_vals:
