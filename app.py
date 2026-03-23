@@ -2387,22 +2387,73 @@ if user == 'ADMIN':
             st.caption(f"총 {len(hist_df)}건의 이력")
 
         st.divider()
-        st.subheader("⏳ 현재 대기 중인 요청")
-        pending = [r for r in mgr.requests if r.get('status') == 'pending']
-        if not pending:
-            st.info("대기 중인 요청이 없습니다.")
+        st.subheader("📋 전체 교환 요청 내역")
+
+        if not mgr.requests:
+            st.info("교환 요청 내역이 없습니다.")
         else:
-            pend_rows = []
-            for r in pending:
-                pend_rows.append({
-                    'ID':    r.get('id', ''),
-                    '신청자': r.get('sender', ''),
-                    '상대방': r.get('receiver', ''),
-                    '턴':    r.get('turn', ''),
-                    '체인':  r.get('chain_id', '-'),
-                })
-            st.dataframe(pd.DataFrame(pend_rows), use_container_width=True, hide_index=True)
-            st.caption(f"대기 중 {len(pending)}건")
+            # 상태 필터
+            all_statuses = sorted(set(r.get('status', '?') for r in mgr.requests))
+            status_labels = {
+                'pending': '⏳ 대기중', 'accepted': '✅ 수락', 'rejected': '❌ 거절',
+                'cancelled': '🚫 취소', 'chain_accepted': '🔗 체인수락',
+                'chain_rejected': '🔗 체인거절', 'error': '⚠️ 오류',
+            }
+            sel_statuses = st.multiselect(
+                "상태 필터", all_statuses,
+                default=all_statuses,
+                format_func=lambda s: status_labels.get(s, s),
+                key="adm_req_status_filter"
+            )
+
+            filtered_reqs = [r for r in mgr.requests if r.get('status') in sel_statuses]
+
+            if not filtered_reqs:
+                st.info("선택한 상태의 요청이 없습니다.")
+            else:
+                req_rows = []
+                for r in filtered_reqs:
+                    sender = r.get('sender', '')
+                    receiver = r.get('receiver', '')
+                    turn = r.get('turn', '')
+                    status = r.get('status', '')
+                    status_icon = status_labels.get(status, status)
+                    chain_id = r.get('chain_id', '')
+
+                    # 교환 내용 표시 (무엇을 주고받는지)
+                    val_s = r.get('val_sender', '')
+                    val_r = r.get('val_receiver', '')
+                    exchange_detail = f"{sender}: {val_s} ↔ {receiver}: {val_r}" if val_s and val_r else ''
+
+                    req_rows.append({
+                        '시각': r.get('timestamp', '')[:16] if r.get('timestamp') else '',
+                        '신청자': sender,
+                        '상대방': receiver,
+                        '턴': turn,
+                        '교환 내용': exchange_detail,
+                        '상태': status_icon,
+                        '체인ID': chain_id if chain_id else '-',
+                        '메시지': r.get('message', '')[:30] if r.get('message') else '',
+                    })
+
+                req_df = pd.DataFrame(req_rows)
+                # 최신순 정렬
+                if '시각' in req_df.columns:
+                    req_df = req_df.sort_values('시각', ascending=False)
+
+                st.dataframe(req_df, use_container_width=True, hide_index=True,
+                             height=min(80 + len(req_df) * 35, 600))
+
+                # 요약 통계
+                c1, c2, c3, c4 = st.columns(4)
+                total = len(mgr.requests)
+                pending_n = sum(1 for r in mgr.requests if r.get('status') == 'pending')
+                accepted_n = sum(1 for r in mgr.requests if r.get('status') in ('accepted', 'chain_accepted'))
+                rejected_n = sum(1 for r in mgr.requests if r.get('status') in ('rejected', 'chain_rejected', 'cancelled'))
+                c1.metric("전체", total)
+                c2.metric("대기중", pending_n)
+                c3.metric("수락", accepted_n)
+                c4.metric("거절/취소", rejected_n)
 
     # ── 관리자 탭4: 장터 현황 ─────────────────────────────────────────────────
     with adm_tab4:
