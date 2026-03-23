@@ -1474,6 +1474,17 @@ class DataManager:
             logging.error(f"휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
 
     # ── DB 로드 / 저장 ─────────────────────────────────────────────────────────
+    def refresh_requests_from_db(self):
+        """JSON 파일에서 requests만 빠르게 재로드 (다른 세션이 추가한 요청 반영)"""
+        if not os.path.exists(DB_FILE):
+            return
+        try:
+            with open(DB_FILE, 'r', encoding='utf-8') as f:
+                db = json.load(f)
+            self.requests = db.get('requests', [])
+        except Exception as e:
+            logging.error(f"requests refresh failed: {e}")
+
     def load_db(self):
         # 시트 연결이 끊어졌거나 휴가 시트가 없으면 재연결 시도
         if not self.sheet_connected or self.vac_holiday_ws is None:
@@ -2316,6 +2327,8 @@ st.markdown(
 if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'admin_settings'):
     st.session_state.manager = DataManager()
 mgr = st.session_state.manager
+# 매 렌더링마다 다른 세션이 추가한 요청을 반영
+mgr.refresh_requests_from_db()
 
 if 'quick_confirm' not in st.session_state:
     st.session_state.quick_confirm = None
@@ -2411,8 +2424,10 @@ if user == 'ADMIN':
     st.title("🔐 관리자 대시보드")
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
+    _adm_gumi_cnt = sum(1 for r in mgr.requests if r.get('status') == 'admin_pending')
+    _gumi_tab_label = f"⚠️ 구미 승인({_adm_gumi_cnt})" if _adm_gumi_cnt else "구미 교환 승인"
     adm_tab1, adm_tab2, adm_tab6, adm_tab9, adm_tab3, adm_tab4, adm_tab5, adm_tab7, adm_tab8 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "구미 교환 승인",
+        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", _gumi_tab_label,
         "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "🗑️ 데이터 관리"
     ])
 
