@@ -589,12 +589,22 @@ class DataManager:
         my_val  = self.df.loc[name, turn]
         results = []
 
+        # 진로선택/진로탐색이면 교환 불가
+        _, my_dept = self.parse_cell(my_val)
+        if my_dept in ('진로선택', '진로탐색'):
+            return []
+
         for partner in self.df.index:
             if partner == name:
                 continue
             partner_val = self.df.loc[partner, turn]
             if my_val == partner_val:
                 continue  # 동일 값은 의미 없음
+
+            # 상대 진로선택/진로탐색 차단
+            _, p_dept = self.parse_cell(partner_val)
+            if p_dept in ('진로선택', '진로탐색'):
+                continue
 
             sched_a = self.df.loc[name].copy()
             sched_b = self.df.loc[partner].copy()
@@ -658,6 +668,11 @@ class DataManager:
                 partner_val = self.df.loc[partner, t]
                 my_val      = self.df.loc[name, t]
                 if not partner_val or not my_val or partner_val == my_val:
+                    continue
+                # 진로선택/진로탐색 차단
+                _, d_my = self.parse_cell(my_val)
+                _, d_pt = self.parse_cell(partner_val)
+                if d_my in ('진로선택', '진로탐색') or d_pt in ('진로선택', '진로탐색'):
                     continue
                 if partner_val != target_dept:
                     continue
@@ -727,6 +742,11 @@ class DataManager:
                 my_val      = self.df.loc[name, t]
                 partner_val = self.df.loc[partner, t]
                 if not my_val or not partner_val or my_val == partner_val:
+                    continue
+                # 진로선택/진로탐색 차단
+                _, d_m = self.parse_cell(my_val)
+                _, d_p = self.parse_cell(partner_val)
+                if d_m in ('진로선택', '진로탐색') or d_p in ('진로선택', '진로탐색'):
                     continue
                 candidates.append({'partner': partner, 'turn': t,
                                    'my_val': my_val, 'partner_val': partner_val})
@@ -942,6 +962,11 @@ class DataManager:
             pv = self.df.loc[target, turn]
             if mv == pv:
                 continue
+            # 진로선택/진로탐색 차단
+            _, d_mv = self.parse_cell(mv)
+            _, d_pv = self.parse_cell(pv)
+            if d_mv in ('진로선택', '진로탐색') or d_pv in ('진로선택', '진로탐색'):
+                continue
             mandatory_swaps.append({
                 'partner': target, 'turn': turn,
                 'my_val': mv, 'partner_val': pv,
@@ -965,6 +990,11 @@ class DataManager:
                 mv = self.df.loc[sender, t]
                 pv = self.df.loc[partner, t]
                 if not mv or not pv or mv == pv:
+                    continue
+                # 진로선택/진로탐색 차단
+                _, d_mv2 = self.parse_cell(mv)
+                _, d_pv2 = self.parse_cell(pv)
+                if d_mv2 in ('진로선택', '진로탐색') or d_pv2 in ('진로선택', '진로탐색'):
                     continue
                 add_candidates.append({
                     'partner': partner, 'turn': t,
