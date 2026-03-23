@@ -1359,13 +1359,12 @@ class DataManager:
         """
         교환 시 휴가 시트를 동기화한다.
         핵심 원리: 휴가 시트의 셀 값 전체를 그대로 맞교환한다.
-        (과목 + 휴가마커(A-4, B-3 등) 모두 포함하여 통째로 스왑)
+        API 호출 최소화: get_all_values 1회 → 셀 위치 계산 → batch_update 1회
 
         예) 정수빈 4턴 'IM\\nA-4' ↔ 이규 4턴 'EMC(소아)\\nB-3'
         → 정수빈 4턴에 'EMC(소아)\\nB-3', 이규 4턴에 'IM\\nA-4' 기록
         """
         # ── 1단계: vacation_data 메모리 갱신 ──
-        # 해당 턴에 휴가가 있는 경우, 휴가 정보도 맞교환
         v1 = self.vacation_data.get(person1, {})
         v2 = self.vacation_data.get(person2, {})
         p1_period = p2_period = None
@@ -1377,14 +1376,12 @@ class DataManager:
             if vi and vi.get('turn') == turn:
                 p2_period = period
 
-        # 양쪽 모두 해당 턴에 휴가가 있으면 타입 교환
         if p1_period and p2_period:
             p1_type = v1[p1_period]['type']
             p2_type = v2[p2_period]['type']
             v1[p1_period]['type'] = p2_type
             v2[p2_period]['type'] = p1_type
             self.save_db()
-        # 한쪽만 휴가인 경우: 휴가가 상대에게 이동
         elif p1_period and not p2_period:
             vac_info = v1.pop(p1_period)
             if person2 not in self.vacation_data:
@@ -1398,26 +1395,88 @@ class DataManager:
             self.vacation_data[person1][p2_period] = vac_info
             self.save_db()
 
-        # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 ──
+        # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 (1회 읽기 → 1회 쓰기) ──
         if not self.sheet_connected or self.vac_holiday_ws is None:
-            print(f"[VAC_SYNC] 시트 미연결 또는 vac_holiday_ws=None → 건너뜀")
+            print(f"[VAC_SYNC] 시트 미연결 → 건너뜀")
             return
 
         try:
-            # 양쪽 셀 값을 한 번에 읽기
-            cell1_raw = self._get_vacation_cell_value(person1, turn)
-            cell2_raw = self._get_vacation_cell_value(person2, turn)
-            print(f"[VAC_SYNC] 읽기 완료: {person1}({turn})='{cell1_raw}' / {person2}({turn})='{cell2_raw}'")
+            # ① 전체 시트를 한 번만 읽기
+            all_rows = self.vac_holiday_ws.get_all_values()
+
+            # ② 헤더 행과 턴 컬럼 인덱스 찾기
+            header_row_idx = name_col_idx = turn_col_idx = None
+            for r_i, row in enumerate(all_rows):
+                for c_i, h in enumerate(row):
+                    if '성명' in h or '이름' in h:
+                        header_row_idx = r_i
+                        name_col_idx = c_i
+                        break
+                if header_row_idx is not None:
+                    for c_i, h in enumerate(all_rows[header_row_idx]):
+                        if h.strip() == turn.strip():
+                            turn_col_idx = c_i
+                            break
+                    break
+
+            if header_row_idx is None or turn_col_idx is None:
+                print(f"[VAC_SYNC] 헤더/컬럼 못 찾음: header_row={header_row_idx}, turn_col={turn_col_idx}")
+                print(f"[VAC_SYNC] 헤더 행: {all_rows[header_row_idx] if header_row_idx is not None else 'N/A'}")
+                return
+
+            # ③ person1, person2의 행 인덱스 찾기 (0-based → 1-based for API)
+            p1_row = p2_row = None
+            for r_i in range(header_row_idx + 1, len(all_rows)):
+                if name_col_idx < len(all_rows[r_i]):
+                    cell_name = all_rows[r_i][name_col_idx].strip()
+                    if cell_name == person1:
+                        p1_row = r_i
+                    elif cell_name == person2:
+                        p2_row = r_i
+                if p1_row is not None and p2_row is not None:
+                    break
+
+            if p1_row is None or p2_row is None:
+                print(f"[VAC_SYNC] 인턴 못 찾음: {person1}→row={p1_row}, {person2}→row={p2_row}")
+                return
+
+            # ④ 현재 셀 값 읽기
+            cell1_val = all_rows[p1_row][turn_col_idx] if turn_col_idx < len(all_rows[p1_row]) else ''
+            cell2_val = all_rows[p2_row][turn_col_idx] if turn_col_idx < len(all_rows[p2_row]) else ''
+            print(f"[VAC_SYNC] 읽기: {person1}[r{p1_row+1}]='{cell1_val}' / {person2}[r{p2_row+1}]='{cell2_val}'")
+
+            # ⑤ 맞교환 쓰기 (gspread API: row/col은 1-based)
+            api_col = turn_col_idx + 1
+            api_row1 = p1_row + 1
+            api_row2 = p2_row + 1
 
             # person1 자리에 person2의 원래 값, person2 자리에 person1의 원래 값
-            w1 = cell2_raw if cell2_raw else ""
-            w2 = cell1_raw if cell1_raw else ""
-            print(f"[VAC_SYNC] 쓰기 예정: {person1}({turn})←'{w1}' / {person2}({turn})←'{w2}'")
-            ok1 = self.update_vacation_sheet_cell(person1, turn, w1)
-            ok2 = self.update_vacation_sheet_cell(person2, turn, w2)
-            print(f"[VAC_SYNC] 쓰기 결과: ok1={ok1}, ok2={ok2}")
+            write1 = cell2_val if cell2_val else ""
+            write2 = cell1_val if cell1_val else ""
+            print(f"[VAC_SYNC] 쓰기: {person1}[r{api_row1},c{api_col}]←'{write1}' / {person2}[r{api_row2},c{api_col}]←'{write2}'")
+
+            self.vac_holiday_ws.update_cell(api_row1, api_col, write1)
+            self.vac_holiday_ws.update_cell(api_row2, api_col, write2)
+
+            # ⑥ 검증: 쓰기 후 다시 읽어서 값이 정상 반영됐는지 확인
+            import time
+            time.sleep(1)
+            verify = self.vac_holiday_ws.get_all_values()
+            v1_after = verify[p1_row][turn_col_idx] if turn_col_idx < len(verify[p1_row]) else '?'
+            v2_after = verify[p2_row][turn_col_idx] if turn_col_idx < len(verify[p2_row]) else '?'
+            print(f"[VAC_SYNC] 검증: {person1}='{v1_after}' / {person2}='{v2_after}'")
+            if v1_after != write1 or v2_after != write2:
+                print(f"[VAC_SYNC] ⚠️ 값이 덮어씌워짐! 수식이 있을 수 있음")
+                # 수식 확인 시도
+                try:
+                    fc1 = self.vac_holiday_ws.acell(f'{chr(64+api_col)}{api_row1}', value_render_option='FORMULA').value
+                    fc2 = self.vac_holiday_ws.acell(f'{chr(64+api_col)}{api_row2}', value_render_option='FORMULA').value
+                    print(f"[VAC_SYNC] 수식확인: {person1}='{fc1}' / {person2}='{fc2}'")
+                except Exception:
+                    pass
+
         except Exception as e:
-            print(f"[VAC_SYNC] 휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
+            print(f"[VAC_SYNC] 실패 ({person1}↔{person2}, {turn}): {e}")
             import traceback; traceback.print_exc()
 
     def _get_vacation_cell_value(self, intern_name, turn_key):
