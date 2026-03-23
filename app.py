@@ -434,6 +434,36 @@ class DataManager:
         except Exception as e:
             print(f"자동 마감 실패: {e}")
 
+    def auto_cancel_conflicting_requests(self, person, turn, executed_req_id=None):
+        """
+        교환 성사 후, 해당 인턴의 같은 턴에 대한 다른 대기 중 요청을 자동 취소.
+        person이 sender이든 receiver이든 관계없이 해당 턴의 pending/chain_accepted/admin_pending 요청 취소.
+        executed_req_id: 방금 성사된 요청 ID (이것은 제외)
+        """
+        cancelled = []
+        for r in self.requests:
+            if r.get('id') == executed_req_id:
+                continue
+            if r.get('status') not in ('pending', 'chain_accepted', 'admin_pending'):
+                continue
+            if r.get('turn') != turn:
+                continue
+            # 이 사람이 sender 또는 receiver인 요청
+            if r.get('sender') == person or r.get('receiver') == person:
+                r['status'] = 'auto_cancelled'
+                cancelled.append(r)
+                # 체인의 경우 같은 chain_id의 다른 요청도 모두 취소
+                cid = r.get('chain_id')
+                if cid:
+                    for cr in self.requests:
+                        if cr.get('chain_id') == cid and cr.get('id') != r.get('id') \
+                                and cr.get('status') in ('pending', 'chain_accepted', 'admin_pending'):
+                            cr['status'] = 'auto_cancelled'
+                            cancelled.append(cr)
+        if cancelled:
+            self.save_db()
+        return cancelled
+
     def get_market_compatibilities(self, viewer, post):
         """
         viewer가 장터 post에 응할 수 있는 교환 조합을 전부 반환.
@@ -1242,6 +1272,8 @@ class DataManager:
                 )
                 self.auto_close_market_posts(r['sender'], r['turn'])
                 self.auto_close_market_posts(r['receiver'], r['turn'])
+                self.auto_cancel_conflicting_requests(r['sender'], r['turn'], r['id'])
+                self.auto_cancel_conflicting_requests(r['receiver'], r['turn'], r['id'])
 
             self.save_db()
             return True, f"🎉 복합 교환 {len(chain_reqs)}건 모두 완료!"
@@ -1992,6 +2024,8 @@ class DataManager:
             self.log_history_to_sheet(p1, p2, turn, val_a, val_b, '관리자승인')
             self.auto_close_market_posts(p1, turn)
             self.auto_close_market_posts(p2, turn)
+            self.auto_cancel_conflicting_requests(p1, turn, req['id'])
+            self.auto_cancel_conflicting_requests(p2, turn, req['id'])
             result_msg = f"✅ 관리자 승인 완료! ({val_a} ↔ {val_b})"
             if vac_debug:
                 result_msg += f"\n\n📋 휴가시트:\n```\n{vac_debug}\n```"
@@ -2082,6 +2116,8 @@ class DataManager:
                 r['status'] = 'accepted'
                 self.auto_close_market_posts(sender, t)
                 self.auto_close_market_posts(rcv, t)
+                self.auto_cancel_conflicting_requests(sender, t, r['id'])
+                self.auto_cancel_conflicting_requests(rcv, t, r['id'])
             # 스케줄 시트 반영 후 휴가 시트 동기화 + 건별 이력 기록
             for s, rcv, t, va, vb in exchange_pairs:
                 self.sync_vacation_sheet_for_exchange(s, rcv, t, vb, va)
@@ -2182,9 +2218,11 @@ class DataManager:
 
             self.save_db()
             self.log_history_to_sheet(p1, p2, turn, val_a, val_b, '수락됨')
-            # 장터 자동 완료 처리
+            # 장터 자동 완료 + 충돌 요청 자동 취소
             self.auto_close_market_posts(p1, turn)
             self.auto_close_market_posts(p2, turn)
+            self.auto_cancel_conflicting_requests(p1, turn, req['id'])
+            self.auto_cancel_conflicting_requests(p2, turn, req['id'])
             result_msg = f"✅ 교환 완료! ({val_a} ↔ {val_b})"
             if vac_debug:
                 result_msg += f"\n\n📋 휴가시트 동기화 상세:\n```\n{vac_debug}\n```"
@@ -2784,7 +2822,8 @@ if user == 'ADMIN':
             all_statuses = sorted(set(r.get('status', '?') for r in mgr.requests))
             status_labels = {
                 'pending': '⏳ 대기중', 'accepted': '✅ 수락', 'rejected': '❌ 거절',
-                'cancelled': '🚫 취소', 'chain_accepted': '🔗 체인수락',
+                'cancelled': '🚫 취소', 'auto_cancelled': '🚫 자동취소',
+                'chain_accepted': '🔗 체인수락',
                 'chain_rejected': '🔗 체인거절', 'error': '⚠️ 오류',
                 'admin_pending': '관리자승인대기', 'admin_rejected': '관리자거절',
             }
@@ -3340,7 +3379,8 @@ with st.sidebar:
                 st.info("보낸 요청이 없습니다.")
             else:
                 lbl_sb = {'pending': '⏳', 'accepted': '✅', 'rejected': '❌',
-                          'cancelled': '🚫', 'chain_accepted': '🔗✅', 'chain_rejected': '🔗❌',
+                          'cancelled': '🚫', 'auto_cancelled': '🚫(자동)',
+                          'chain_accepted': '🔗✅', 'chain_rejected': '🔗❌',
                           'admin_pending': '⏳(관리자)', 'admin_rejected': '❌(관리자)'}
                 # 체인 그룹 표시
                 shown_chains = set()
@@ -3354,6 +3394,8 @@ with st.sidebar:
                         statuses = [x['status'] for x in chain_all]
                         if all(s == 'accepted' for s in statuses):
                             chain_icon = "✅"
+                        elif any(s == 'auto_cancelled' for s in statuses):
+                            chain_icon = "🚫(자동취소)"
                         elif any(s in ('chain_rejected', 'admin_rejected') for s in statuses):
                             chain_icon = "❌"
                         elif any(s == 'admin_pending' for s in statuses):
