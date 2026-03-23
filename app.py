@@ -2324,7 +2324,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'admin_settings'):
+if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'refresh_requests_from_db'):
     st.session_state.manager = DataManager()
 mgr = st.session_state.manager
 # 매 렌더링마다 다른 세션이 추가한 요청을 반영
