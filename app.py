@@ -2297,6 +2297,61 @@ if user == 'ADMIN':
             mc5.metric("🚨 휴가제외 각1↑", n_excl_bad)
             st.dataframe(status_df, use_container_width=True, hide_index=True)
 
+            # ── 5) 구미 연속 턴 분석 ─────────────────────────────────────────
+            st.divider()
+            st.subheader("📌 구미 연속 배치 현황")
+            st.caption("턴 순서대로 '구미' 배치가 연속되는 인턴 목록입니다.")
+
+            # 턴을 숫자 순서대로 정렬
+            turn_cols = sorted(mgr.df.columns, key=lambda c: int(re.sub(r'\D', '', c)) if re.sub(r'\D', '', c) else 0)
+
+            gumi_consec_rows = []
+            for intern in mgr.df.index:
+                # 각 턴의 지역 추출
+                turn_locs = []
+                for t in turn_cols:
+                    val = mgr.df.loc[intern, t]
+                    if not val or str(val) in ('None', '', 'nan'):
+                        turn_locs.append((t, None))
+                    else:
+                        loc, dept = mgr.parse_cell(val)
+                        turn_locs.append((t, loc or DEFAULT_LOCATION))
+
+                # 연속 구미 구간 찾기
+                streaks = []
+                current_streak = []
+                for t, loc in turn_locs:
+                    if loc == '구미':
+                        current_streak.append(t)
+                    else:
+                        if len(current_streak) >= 2:
+                            streaks.append(current_streak[:])
+                        current_streak = []
+                if len(current_streak) >= 2:
+                    streaks.append(current_streak[:])
+
+                if streaks:
+                    for streak in streaks:
+                        vals = [str(mgr.df.loc[intern, t]) for t in streak]
+                        gumi_consec_rows.append({
+                            '인턴': intern,
+                            '연속 수': len(streak),
+                            '연속 턴': ' → '.join(streak),
+                            '배치 내용': ' → '.join(vals),
+                        })
+
+            if gumi_consec_rows:
+                gumi_df = pd.DataFrame(gumi_consec_rows).sort_values('연속 수', ascending=False)
+                g_total = len(set(r['인턴'] for r in gumi_consec_rows))
+                g_max = gumi_df['연속 수'].max()
+                gc1, gc2 = st.columns(2)
+                gc1.metric("구미 연속 배치 인턴 수", f"{g_total}명")
+                gc2.metric("최대 연속 턴", f"{g_max}턴")
+                st.dataframe(gumi_df, use_container_width=True, hide_index=True,
+                             height=min(80 + len(gumi_df) * 35, 500))
+            else:
+                st.success("구미 연속 배치(2턴 이상)인 인턴이 없습니다.")
+
     # ── 관리자 탭2: 전체 스케줄 ────────────────────────────────────────────────
     with adm_tab2:
         if mgr.df.empty:
