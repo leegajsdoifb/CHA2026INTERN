@@ -1182,6 +1182,28 @@ class DataManager:
                     )
                 return False, "⚠️ 복합 교환 재검증 실패:\n" + "\n".join(fail_msgs)
 
+            # ★ 구미 포함 여부 체크 → 관리자 최종 승인 필요
+            has_gumi = False
+            for r in chain_reqs:
+                _t = r['turn']
+                va = self.df.loc[sender, _t] if sender in self.df.index and _t in self.df.columns else ''
+                vb = self.df.loc[r['receiver'], _t] if r['receiver'] in self.df.index and _t in self.df.columns else ''
+                if self._involves_gumi(va, vb):
+                    has_gumi = True
+                    break
+
+            if has_gumi:
+                for r in chain_reqs:
+                    r['status'] = 'admin_pending'
+                    # 최신 값 저장
+                    _t = r['turn']
+                    if sender in self.df.index and _t in self.df.columns:
+                        r['val_sender'] = str(self.df.loc[sender, _t])
+                    if r['receiver'] in self.df.index and _t in self.df.columns:
+                        r['val_receiver'] = str(self.df.loc[r['receiver'], _t])
+                self.save_db()
+                return True, "⏳ 구미 관련 복합 교환입니다. 전원 수락 완료, **관리자 최종 승인** 대기 중입니다."
+
             # 일괄 실행
             sheet_ok = True
             for r in chain_reqs:
@@ -1804,6 +1826,173 @@ class DataManager:
         self.save_db()
         return True, f"✅ 교환 요청 완료 ({val_a} ↔ {val_b})"
 
+    # ── 구미 포함 여부 체크 ────────────────────────────────────────────────────
+    def _involves_gumi(self, *cell_values):
+        """셀 값 중 하나라도 구미 지역이면 True"""
+        for val in cell_values:
+            if not val or str(val) in ('None', '', 'nan'):
+                continue
+            loc, _ = self.parse_cell(val)
+            if (loc or DEFAULT_LOCATION) == '구미':
+                return True
+        return False
+
+    # ── 관리자 최종 승인/거절 (구미 교환) ────────────────────────────────────────
+    def admin_approve_request(self, req_id, action):
+        """admin_pending 상태의 요청을 관리자가 최종 처리"""
+        req = next((r for r in self.requests if r['id'] == req_id), None)
+        if not req:
+            return False, "요청을 찾을 수 없습니다."
+        if req.get('status') != 'admin_pending':
+            return False, f"관리자 승인 대기 상태가 아닙니다. (상태: {req['status']})"
+
+        p1, p2, turn = req['sender'], req['receiver'], req['turn']
+
+        if action == 'reject':
+            req['status'] = 'admin_rejected'
+            self.save_db()
+            self.log_history_to_sheet(p1, p2, turn,
+                req.get('val_sender', ''), req.get('val_receiver', ''),
+                '관리자거절')
+            return True, "관리자가 교환을 거절했습니다."
+
+        if action == 'approve':
+            if p1 not in self.df.index or p2 not in self.df.index:
+                return False, "명단에서 인턴을 찾을 수 없습니다."
+
+            # 최신 데이터 재조회
+            fresh_df = self.fetch_data_from_sheet()
+            if not fresh_df.empty:
+                self.df = fresh_df
+
+            val_a = self.df.loc[p1, turn]
+            val_b = self.df.loc[p2, turn]
+
+            # 재검증
+            sched_a = self.df.loc[p1].copy(); sched_a[turn] = val_b
+            sched_b = self.df.loc[p2].copy(); sched_b[turn] = val_a
+            v1, m1 = self.validate_intern(p1, sched_a)
+            v2, m2 = self.validate_intern(p2, sched_b)
+            b1 = self.validate_bundang(p1, sched_a)
+            b2 = self.validate_bundang(p2, sched_b)
+            ok_vac, vac_errs = self.validate_vacation_exchange(p1, p2, turn)
+
+            if not v1 or not v2 or not b1 or not b2 or not ok_vac:
+                lines = ["⚠️ 관리자 승인 시점 재검증 실패"]
+                if not v1: lines.append(f"• {p1}: 필수과목 {', '.join(sorted(m1))} 누락")
+                if not v2: lines.append(f"• {p2}: 필수과목 {', '.join(sorted(m2))} 누락")
+                if not b1: lines.append(f"• {p1}: 분당 근무 부족")
+                if not b2: lines.append(f"• {p2}: 분당 근무 부족")
+                lines.extend(vac_errs)
+                req['status'] = 'admin_rejected'
+                self.save_db()
+                self.log_history_to_sheet(p1, p2, turn, val_a, val_b,
+                                          '관리자거절', '승인 시점 재검증 실패')
+                return False, "\n".join(lines)
+
+            # 교환 실행
+            self.df.loc[p1, turn] = val_b
+            self.df.loc[p2, turn] = val_a
+            self.swap_vacation_data(p1, p2, turn)
+
+            sheet_ok = True
+            if self.sheet_connected:
+                ok1 = self.update_sheet_cell(p1, turn, val_b)
+                ok2 = self.update_sheet_cell(p2, turn, val_a)
+                sheet_ok = ok1 and ok2
+
+            if not sheet_ok:
+                self.df.loc[p1, turn] = val_a
+                self.df.loc[p2, turn] = val_b
+                return False, "구글 시트 반영 오류. 취소됩니다."
+
+            req['status'] = 'accepted'
+            self.save_db()
+            self.log_history_to_sheet(p1, p2, turn, val_a, val_b, '관리자승인')
+            self.auto_close_market_posts(p1, turn)
+            self.auto_close_market_posts(p2, turn)
+            return True, f"✅ 관리자 승인 완료! ({val_a} ↔ {val_b})"
+
+        return False, "알 수 없는 동작입니다."
+
+    def admin_approve_chain(self, chain_id, action):
+        """admin_pending 상태의 체인 교환을 관리자가 최종 처리"""
+        chain_reqs = [r for r in self.requests if r.get('chain_id') == chain_id]
+        if not chain_reqs:
+            return False, "체인 요청을 찾을 수 없습니다."
+        if not all(r['status'] == 'admin_pending' for r in chain_reqs):
+            return False, "관리자 승인 대기 상태가 아닙니다."
+
+        sender = chain_reqs[0]['sender']
+
+        if action == 'reject':
+            for r in chain_reqs:
+                r['status'] = 'admin_rejected'
+            self.save_db()
+            self.log_history_to_sheet(sender, '', '', '', '', '관리자거절(복합)')
+            return True, "관리자가 복합 교환을 거절했습니다."
+
+        if action == 'approve':
+            # 최신 데이터 재조회
+            fresh_df = self.fetch_data_from_sheet()
+            if not fresh_df.empty:
+                self.df = fresh_df
+
+            # 재검증
+            test_sched = {sender: self.df.loc[sender].copy()}
+            for r in chain_reqs:
+                rcv = r['receiver']
+                if rcv not in test_sched:
+                    test_sched[rcv] = self.df.loc[rcv].copy()
+
+            for r in chain_reqs:
+                t = r['turn']
+                va = test_sched[sender][t]
+                vb = test_sched[r['receiver']][t]
+                test_sched[sender][t] = vb
+                test_sched[r['receiver']][t] = va
+
+            errors = []
+            for person, sched in test_sched.items():
+                v, m = self.validate_intern(person, sched)
+                if not v:
+                    errors.append(f"{person}: 필수과목 {', '.join(sorted(m))} 누락")
+                if not self.validate_bundang(person, sched):
+                    errors.append(f"{person}: 분당 근무 부족")
+
+            chain_ex = [{'target': r['receiver'], 'turn': r['turn']} for r in chain_reqs]
+            ok_vb, vb_errs = self.validate_vacation_balance(sender, chain_ex)
+            if not ok_vb:
+                errors.extend(vb_errs)
+
+            if errors:
+                for r in chain_reqs:
+                    r['status'] = 'admin_rejected'
+                self.save_db()
+                return False, "⚠️ 관리자 승인 시점 재검증 실패:\n" + "\n".join(errors)
+
+            # 교환 실행
+            for r in chain_reqs:
+                t = r['turn']
+                rcv = r['receiver']
+                va = self.df.loc[sender, t]
+                vb = self.df.loc[rcv, t]
+                self.df.loc[sender, t] = vb
+                self.df.loc[rcv, t] = va
+                self.swap_vacation_data(sender, rcv, t)
+                if self.sheet_connected:
+                    self.update_sheet_cell(sender, t, vb)
+                    self.update_sheet_cell(rcv, t, va)
+                r['status'] = 'accepted'
+                self.auto_close_market_posts(sender, t)
+                self.auto_close_market_posts(rcv, t)
+
+            self.save_db()
+            self.log_history_to_sheet(sender, '', '', '', '', '관리자승인(복합)')
+            return True, f"✅ 관리자 승인 완료! 복합 교환 {len(chain_reqs)}건 실행"
+
+        return False, "알 수 없는 동작입니다."
+
     # ── 요청 처리 (수락 / 거절) ───────────────────────────────────────────────
     def process_request(self, req_id, action):
         req = next((r for r in self.requests if r['id'] == req_id), None)
@@ -1862,6 +2051,14 @@ class DataManager:
                 self.log_history_to_sheet(p1, p2, turn, val_a, val_b,
                                           '자동거절', '수락 시점 재검증 실패')
                 return False, "\n".join(lines)
+
+            # ★ 구미 포함 교환은 관리자 최종 승인 필요
+            if self._involves_gumi(val_a, val_b):
+                req['status'] = 'admin_pending'
+                req['val_sender'] = str(val_a)
+                req['val_receiver'] = str(val_b)
+                self.save_db()
+                return True, "⏳ 구미 관련 교환입니다. 상대방이 수락했으며, **관리자 최종 승인** 대기 중입니다."
 
             # 교환 실행
             self.df.loc[p1, turn] = val_b
@@ -2137,9 +2334,9 @@ if user == 'ADMIN':
     st.title("🔐 관리자 대시보드")
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
-    adm_tab1, adm_tab2, adm_tab6, adm_tab3, adm_tab4, adm_tab5, adm_tab7, adm_tab8 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🔄 교환 이력",
-        "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "⚙️ 교환 설정"
+    adm_tab1, adm_tab2, adm_tab6, adm_tab9, adm_tab3, adm_tab4, adm_tab5, adm_tab7, adm_tab8 = st.tabs([
+        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🏭 구미 교환 승인",
+        "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "⚙️ 교환 설정"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -2486,6 +2683,7 @@ if user == 'ADMIN':
                 'pending': '⏳ 대기중', 'accepted': '✅ 수락', 'rejected': '❌ 거절',
                 'cancelled': '🚫 취소', 'chain_accepted': '🔗 체인수락',
                 'chain_rejected': '🔗 체인거절', 'error': '⚠️ 오류',
+                'admin_pending': '🏭 관리자승인대기', 'admin_rejected': '🏭 관리자거절',
             }
             sel_statuses = st.multiselect(
                 "상태 필터", all_statuses,
@@ -2716,6 +2914,110 @@ if user == 'ADMIN':
             st.dataframe(filtered, use_container_width=True, hide_index=True,
                          height=min(80 + len(filtered) * 35, 500))
 
+    # ── 관리자 탭9: 구미 교환 승인 ──────────────────────────────────────────
+    with adm_tab9:
+        st.subheader("🏭 구미 교환 관리자 승인")
+        st.caption("구미 지역이 포함된 교환은 상대방 수락 후에도 관리자 최종 승인이 필요합니다.")
+
+        # admin_pending 상태 요청 수집
+        admin_pending_reqs = [r for r in mgr.requests if r.get('status') == 'admin_pending']
+
+        if not admin_pending_reqs:
+            st.info("현재 관리자 승인 대기 중인 구미 교환이 없습니다.")
+        else:
+            # 체인 vs 단일 분류
+            chain_groups = {}
+            single_reqs = []
+            for r in admin_pending_reqs:
+                cid = r.get('chain_id')
+                if cid:
+                    if cid not in chain_groups:
+                        chain_groups[cid] = []
+                    chain_groups[cid].append(r)
+                else:
+                    single_reqs.append(r)
+
+            st.metric("승인 대기", f"단일 {len(single_reqs)}건 / 복합 {len(chain_groups)}건")
+            st.divider()
+
+            # ── 단일 교환 ──
+            if single_reqs:
+                st.markdown("### 단일 교환")
+                for r in single_reqs:
+                    with st.expander(
+                        f"🔄 {r['sender']} ↔ {r['receiver']} | {r['turn']} | "
+                        f"{r.get('val_sender','')} ↔ {r.get('val_receiver','')}",
+                        expanded=True
+                    ):
+                        sc1, sc2, sc3 = st.columns(3)
+                        sc1.write(f"**신청자**: {r['sender']}")
+                        sc2.write(f"**상대방**: {r['receiver']}")
+                        sc3.write(f"**턴**: {r['turn']}")
+                        st.write(f"**교환 내용**: `{r.get('val_sender','')}` ↔ `{r.get('val_receiver','')}`")
+                        if r.get('message'):
+                            st.write(f"**메시지**: {r['message']}")
+                        st.write(f"**신청 시각**: {r.get('timestamp','')}")
+
+                        bc1, bc2 = st.columns(2)
+                        with bc1:
+                            if st.button("✅ 승인", key=f"adm_approve_{r['id']}", type="primary",
+                                         use_container_width=True):
+                                ok, msg = mgr.admin_approve_request(r['id'], 'approve')
+                                if ok:
+                                    st.success(msg)
+                                else:
+                                    st.error(msg)
+                                st.rerun()
+                        with bc2:
+                            if st.button("❌ 거절", key=f"adm_reject_{r['id']}",
+                                         use_container_width=True):
+                                ok, msg = mgr.admin_approve_request(r['id'], 'reject')
+                                if ok:
+                                    st.warning(msg)
+                                else:
+                                    st.error(msg)
+                                st.rerun()
+
+            # ── 복합 교환 ──
+            if chain_groups:
+                st.markdown("### 복합 교환")
+                for cid, reqs in chain_groups.items():
+                    sender = reqs[0]['sender']
+                    swap_summary = " / ".join(
+                        f"{r['turn']}: {r.get('val_sender','')}↔{r.get('val_receiver','')}"
+                        for r in reqs
+                    )
+                    with st.expander(
+                        f"🔗 {sender} 복합교환 ({len(reqs)}건) | {swap_summary}",
+                        expanded=True
+                    ):
+                        for r in reqs:
+                            st.write(f"• **{r['receiver']}** | {r['turn']} | "
+                                     f"`{r.get('val_sender','')}` ↔ `{r.get('val_receiver','')}`")
+                        if reqs[0].get('message'):
+                            st.write(f"**메시지**: {reqs[0]['message']}")
+                        st.write(f"**신청 시각**: {reqs[0].get('timestamp','')}")
+
+                        cc1, cc2 = st.columns(2)
+                        with cc1:
+                            if st.button("✅ 전체 승인", key=f"adm_ch_approve_{cid}", type="primary",
+                                         use_container_width=True):
+                                ok, msg = mgr.admin_approve_chain(cid, 'approve')
+                                if ok:
+                                    st.success(msg)
+                                else:
+                                    st.error(msg)
+                                st.rerun()
+                        with cc2:
+                            if st.button("❌ 전체 거절", key=f"adm_ch_reject_{cid}",
+                                         use_container_width=True):
+                                ok, msg = mgr.admin_approve_chain(cid, 'reject')
+                                if ok:
+                                    st.warning(msg)
+                                else:
+                                    st.error(msg)
+                                st.rerun()
+
     # ── 관리자 탭8: 교환 설정 ────────────────────────────────────────────────
     with adm_tab8:
         st.subheader("⚙️ 교환 규칙 설정")
@@ -2834,7 +3136,7 @@ with st.sidebar:
                     if r['receiver'] == user and r['status'] == 'pending' and 'chain_id' in r]
     inbox_sb     = inbox_normal + inbox_chain
     sent_pend_sb = [r for r in mgr.requests
-                    if r['sender'] == user and r['status'] in ('pending', 'chain_accepted')]
+                    if r['sender'] == user and r['status'] in ('pending', 'chain_accepted', 'admin_pending')]
     with st.expander(
         f"📩 요청 내역  (받은 {len(inbox_sb)} · 보낸 {len(sent_pend_sb)})",
         expanded=len(inbox_sb) > 0
@@ -2910,7 +3212,8 @@ with st.sidebar:
                 st.info("보낸 요청이 없습니다.")
             else:
                 lbl_sb = {'pending': '⏳', 'accepted': '✅', 'rejected': '❌',
-                          'cancelled': '🚫', 'chain_accepted': '🔗✅', 'chain_rejected': '🔗❌'}
+                          'cancelled': '🚫', 'chain_accepted': '🔗✅', 'chain_rejected': '🔗❌',
+                          'admin_pending': '🏭⏳', 'admin_rejected': '🏭❌'}
                 # 체인 그룹 표시
                 shown_chains = set()
                 for r in reversed(sent_all_sb):
@@ -2923,8 +3226,10 @@ with st.sidebar:
                         statuses = [x['status'] for x in chain_all]
                         if all(s == 'accepted' for s in statuses):
                             chain_icon = "✅"
-                        elif any(s in ('chain_rejected',) for s in statuses):
+                        elif any(s in ('chain_rejected', 'admin_rejected') for s in statuses):
                             chain_icon = "❌"
+                        elif any(s == 'admin_pending' for s in statuses):
+                            chain_icon = "🏭⏳"
                         elif any(s == 'chain_accepted' for s in statuses):
                             chain_icon = "🔗⏳"
                         else:
@@ -2948,6 +3253,8 @@ with st.sidebar:
                         )
                         if r.get('message'):
                             st.caption(f"💬 {r['message']}")
+                        if r['status'] == 'admin_pending':
+                            st.info("🏭 구미 교환 — 관리자 최종 승인 대기 중")
                         if r['status'] == 'pending':
                             if st.button("취소", key=f"sb_cancel_{r['id']}", use_container_width=True):
                                 ok, msg = mgr.cancel_request(r['id'], user)
