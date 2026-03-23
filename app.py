@@ -1323,8 +1323,9 @@ class DataManager:
             return False
 
     def update_vacation_sheet_cell(self, intern_name, turn_key, new_value):
-        """휴가 시트의 특정 인턴·턴 셀을 그대로 덮어쓴다 (swap_vacation_data 전용)."""
+        """휴가 시트의 특정 인턴·턴 셀을 그대로 덮어쓴다."""
         if not self.sheet_connected or self.vac_holiday_ws is None:
+            print(f"[VAC_WRITE] 시트 미연결 → 건너뜀 ({intern_name}, {turn_key})")
             return False
         try:
             cell = self.vac_holiday_ws.find(intern_name)
@@ -1343,11 +1344,15 @@ class DataManager:
                             break
                     break
             if turn_col_idx is None:
+                print(f"[VAC_WRITE] 컬럼 '{turn_key}' 못 찾음! ({intern_name})")
                 return False
-            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, new_value if new_value else "")
+            write_val = new_value if new_value else ""
+            print(f"[VAC_WRITE] {intern_name}({turn_key}) row={row_idx} col={turn_col_idx} ← '{write_val}'")
+            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, write_val)
             return True
         except Exception as e:
-            print(f"휴가 시트 업데이트 실패 ({intern_name}): {e}")
+            print(f"[VAC_WRITE] 휴가 시트 업데이트 실패 ({intern_name}, {turn_key}): {e}")
+            import traceback; traceback.print_exc()
             return False
 
     def sync_vacation_sheet_for_exchange(self, person1, person2, turn, new_val_p1, new_val_p2):
@@ -1395,18 +1400,25 @@ class DataManager:
 
         # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 ──
         if not self.sheet_connected or self.vac_holiday_ws is None:
+            print(f"[VAC_SYNC] 시트 미연결 또는 vac_holiday_ws=None → 건너뜀")
             return
 
         try:
             # 양쪽 셀 값을 한 번에 읽기
             cell1_raw = self._get_vacation_cell_value(person1, turn)
             cell2_raw = self._get_vacation_cell_value(person2, turn)
+            print(f"[VAC_SYNC] 읽기 완료: {person1}({turn})='{cell1_raw}' / {person2}({turn})='{cell2_raw}'")
 
             # person1 자리에 person2의 원래 값, person2 자리에 person1의 원래 값
-            self.update_vacation_sheet_cell(person1, turn, cell2_raw if cell2_raw else "")
-            self.update_vacation_sheet_cell(person2, turn, cell1_raw if cell1_raw else "")
+            w1 = cell2_raw if cell2_raw else ""
+            w2 = cell1_raw if cell1_raw else ""
+            print(f"[VAC_SYNC] 쓰기 예정: {person1}({turn})←'{w1}' / {person2}({turn})←'{w2}'")
+            ok1 = self.update_vacation_sheet_cell(person1, turn, w1)
+            ok2 = self.update_vacation_sheet_cell(person2, turn, w2)
+            print(f"[VAC_SYNC] 쓰기 결과: ok1={ok1}, ok2={ok2}")
         except Exception as e:
-            print(f"휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
+            print(f"[VAC_SYNC] 휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
+            import traceback; traceback.print_exc()
 
     def _get_vacation_cell_value(self, intern_name, turn_key):
         """휴가 시트에서 특정 인턴·턴의 셀 값을 읽는다."""
@@ -1427,10 +1439,14 @@ class DataManager:
                             break
                     break
             if turn_col_idx is None:
+                print(f"[VAC_READ] 컬럼 '{turn_key}' 못 찾음! 헤더: {all_rows[header_row_num-1] if header_row_num else 'N/A'}")
                 return None
-            return all_rows[row_idx - 1][turn_col_idx]
+            val = all_rows[row_idx - 1][turn_col_idx]
+            print(f"[VAC_READ] {intern_name}({turn_key}) row={row_idx} col={turn_col_idx} → '{val}'")
+            return val
         except Exception as e:
-            print(f"[ERROR] _get_vac_cell failed: {e}")
+            print(f"[ERROR] _get_vac_cell failed ({intern_name}, {turn_key}): {e}")
+            import traceback; traceback.print_exc()
             return None
 
     @staticmethod
