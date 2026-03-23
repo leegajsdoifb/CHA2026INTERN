@@ -3525,8 +3525,24 @@ with tab_post:
             key=f"mkt_want_vals_{fv}",
             help="선택한 과목 중 하나라도 갖고 있는 사람의 교환 신청을 받을 수 있습니다. 선택하지 않으면 무관"
         )
-        give_turn_k = '아무턴'
-        give_val_k  = ''
+
+        # 내가 교환해줄 턴 선택 (아무턴 or 특정 턴)
+        my_turns_for_give = ['아무턴'] + all_turns_p
+        sel_give_turn_recv = st.selectbox(
+            "내가 교환해줄 턴",
+            my_turns_for_give,
+            key=f"mkt_recv_give_turn_{fv}",
+            help="'아무턴'이면 모든 턴 대상으로 등록됩니다. 특정 턴을 선택하면 해당 턴만 교환 대상으로 올립니다."
+        )
+
+        if sel_give_turn_recv == '아무턴':
+            give_turn_k = '아무턴'
+            give_val_k  = ''
+        else:
+            give_turn_k = sel_give_turn_recv
+            give_val_k  = str(mgr.df.loc[user, give_turn_k]) if user in mgr.df.index and give_turn_k in mgr.df.columns else ''
+            st.write(f"📌 내 {give_turn_k} 현재 값: **`{give_val_k}`**")
+
         want_str_k  = ', '.join(sel_want_vals) if sel_want_vals else '무관'
         if sel_want_vals:
             st.info(f"💡 **{', '.join(sel_want_vals)}** 과목이 있는 턴을 줄 수 있는 사람의 교환 신청을 받습니다.")
