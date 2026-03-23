@@ -4,9 +4,14 @@ import pandas as pd
 import json
 import os
 import re
+import time
+import logging
+import traceback
 from datetime import datetime, timezone, timedelta
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 # ── 상수 ──────────────────────────────────────────────────────────────────────
 _BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
@@ -77,7 +82,7 @@ class DataManager:
             elif os.path.exists(KEY_FILE):
                 creds = ServiceAccountCredentials.from_json_keyfile_name(KEY_FILE, self.scope)
             else:
-                print("구글 키 없음 (st.secrets 또는 service_account.json 필요)")
+                logging.warning("구글 키 없음 (st.secrets 또는 service_account.json 필요)")
                 return
 
             self.gc = gspread.authorize(creds)
@@ -117,7 +122,7 @@ class DataManager:
                         title=MARKET_SHEET_NAME, rows=500, cols=len(MARKET_HEADER)
                     )
                 except Exception as e:
-                    print(f"[ERROR] market_ws init failed: {e}")
+                    logging.error(f"market_ws init failed: {e}")
                     self.market_ws = None
             if self.market_ws:
                 self._ensure_header(self.market_ws, MARKET_HEADER)
@@ -131,17 +136,17 @@ class DataManager:
                         title=LOGIN_LOG_SHEET, rows=1000, cols=len(LOGIN_LOG_HEADER)
                     )
                 except Exception as e:
-                    print(f"[ERROR] login_log_ws creation failed: {e}")
+                    logging.error(f"login_log_ws creation failed: {e}")
                     self.login_log_ws = None
             if self.login_log_ws:
                 self._ensure_header(self.login_log_ws, LOGIN_LOG_HEADER)
 
             self.sheet_connected = True
-            print("구글 시트 연결 성공")
+            logging.info("구글 시트 연결 성공")
 
         except Exception as e:
             self.sheet_connected = False
-            print(f"구글 시트 연결 오류: {e}")
+            logging.error(f"구글 시트 연결 오류: {e}")
 
     def _ensure_header(self, ws, header):
         """시트 첫 행이 비어 있으면 헤더를 삽입한다."""
@@ -150,7 +155,7 @@ class DataManager:
             if not rows or all(c == '' for c in rows[0]):
                 ws.update('A1', [header])
         except Exception as e:
-            print(f"헤더 초기화 실패: {e}")
+            logging.error(f"헤더 초기화 실패: {e}")
 
     # ── 로그인 이력 ─────────────────────────────────────────────────────────────
     def log_login(self, name, result, reason=''):
@@ -162,7 +167,7 @@ class DataManager:
             self.login_log_ws.append_row([now, name, result, reason],
                                          value_input_option='USER_ENTERED')
         except Exception as e:
-            print(f"로그인 이력 기록 실패: {e}")
+            logging.error(f"로그인 이력 기록 실패: {e}")
 
     def fetch_login_logs(self, limit=100):
         """최근 로그인 이력을 가져온다."""
@@ -178,7 +183,7 @@ class DataManager:
             data.reverse()
             return [dict(zip(header, row)) for row in data[:limit]]
         except Exception as e:
-            print(f"[ERROR] get_login_logs failed: {e}")
+            logging.error(f"get_login_logs failed: {e}")
             return []
 
     # ── 비밀번호 ───────────────────────────────────────────────────────────────
@@ -204,7 +209,7 @@ class DataManager:
                     result[name] = pw if pw else '1234'
             return result
         except Exception as e:
-            print(f"비밀번호 로드 실패: {e}")
+            logging.error(f"비밀번호 로드 실패: {e}")
             return {}
 
     def check_password(self, name, password):
@@ -248,7 +253,7 @@ class DataManager:
                 value_input_option='USER_ENTERED'
             )
         except Exception as e:
-            print(f"교환이력 기록 실패: {e}")
+            logging.error(f"교환이력 기록 실패: {e}")
 
     def fetch_history_data(self):
         """교환이력 시트 전체 행 반환 (UI에서 직접 호출)"""
@@ -257,7 +262,7 @@ class DataManager:
         try:
             return self.history_ws.get_all_values()
         except Exception as e:
-            print(f"[ERROR] fetch_history_data failed: {e}")
+            logging.error(f"fetch_history_data failed: {e}")
             return []
 
     # ── 휴가 데이터 (시트에서 로드) ──────────────────────────────────────────
@@ -321,7 +326,7 @@ class DataManager:
                             break
             return result
         except Exception as e:
-            print(f"휴가 시트 파싱 실패: {e}")
+            logging.error(f"휴가 시트 파싱 실패: {e}")
             return {}
 
     def fetch_vacation_data_from_sheets(self):
@@ -362,7 +367,7 @@ class DataManager:
                 posts.append(dict(zip(header, padded)))
             return posts
         except Exception as e:
-            print(f"장터 로드 실패: {e}")
+            logging.error(f"장터 로드 실패: {e}")
             return []
 
     def add_market_post(self, name, give_turn, give_val, want_dept, message):
@@ -432,7 +437,7 @@ class DataManager:
                     self.market_ws.update_cell(row_i, status_col + 1, '완료')
             self.market_posts = self.fetch_market_posts()
         except Exception as e:
-            print(f"자동 마감 실패: {e}")
+            logging.error(f"자동 마감 실패: {e}")
 
     def auto_cancel_conflicting_requests(self, person, turn, executed_req_id=None):
         """
@@ -478,8 +483,7 @@ class DataManager:
         if not poster or poster not in self.df.index or viewer not in self.df.index:
             return []
 
-        import re as _re
-        _turn_pat = _re.compile(r'^\d+턴$')
+        _turn_pat = re.compile(r'^\d+턴$')
 
         # 원하는 목록 파싱: 턴 이름(예: '5턴') vs 과목명(예: 'ANE') 구분
         want_raw = [d.strip() for d in want_str.split(',') if d.strip() and d.strip() != '무관'] \
@@ -1360,7 +1364,6 @@ class DataManager:
     def update_vacation_sheet_cell(self, intern_name, turn_key, new_value):
         """휴가 시트의 특정 인턴·턴 셀을 그대로 덮어쓴다."""
         if not self.sheet_connected or self.vac_holiday_ws is None:
-            print(f"[VAC_WRITE] 시트 미연결 → 건너뜀 ({intern_name}, {turn_key})")
             return False
         try:
             cell = self.vac_holiday_ws.find(intern_name)
@@ -1379,25 +1382,16 @@ class DataManager:
                             break
                     break
             if turn_col_idx is None:
-                print(f"[VAC_WRITE] 컬럼 '{turn_key}' 못 찾음! ({intern_name})")
+                logging.warning(f"휴가시트 컬럼 '{turn_key}' 못 찾음 ({intern_name})")
                 return False
-            write_val = new_value if new_value else ""
-            print(f"[VAC_WRITE] {intern_name}({turn_key}) row={row_idx} col={turn_col_idx} ← '{write_val}'")
-            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, write_val)
+            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, new_value if new_value else "")
             return True
         except Exception as e:
-            print(f"[VAC_WRITE] 휴가 시트 업데이트 실패 ({intern_name}, {turn_key}): {e}")
-            import traceback; traceback.print_exc()
+            logging.error(f"휴가 시트 업데이트 실패 ({intern_name}, {turn_key}): {e}")
             return False
 
     def sync_vacation_sheet_for_exchange(self, person1, person2, turn, new_val_p1, new_val_p2):
-        """
-        교환 시 휴가 시트를 동기화한다.
-        핵심 원리: 휴가 시트의 셀 값 전체를 그대로 맞교환한다.
-        반환: 디버그 메시지 문자열 (UI에 표시용)
-        """
-        debug_lines = []
-
+        """교환 시 휴가 시트의 셀 값 전체를 그대로 맞교환한다."""
         # ── 1단계: vacation_data 메모리 갱신 ──
         v1 = self.vacation_data.get(person1, {})
         v2 = self.vacation_data.get(person2, {})
@@ -1411,40 +1405,29 @@ class DataManager:
                 p2_period = period
 
         if p1_period and p2_period:
-            p1_type = v1[p1_period]['type']
-            p2_type = v2[p2_period]['type']
-            v1[p1_period]['type'] = p2_type
-            v2[p2_period]['type'] = p1_type
+            v1[p1_period]['type'], v2[p2_period]['type'] = v2[p2_period]['type'], v1[p1_period]['type']
             self.save_db()
-            debug_lines.append(f"메모리: 양쪽 휴가 교환 ({p1_type}↔{p2_type})")
         elif p1_period and not p2_period:
             vac_info = v1.pop(p1_period)
             if person2 not in self.vacation_data:
                 self.vacation_data[person2] = {}
             self.vacation_data[person2][p1_period] = vac_info
             self.save_db()
-            debug_lines.append(f"메모리: {person1}→{person2} 휴가 이동")
         elif p2_period and not p1_period:
             vac_info = v2.pop(p2_period)
             if person1 not in self.vacation_data:
                 self.vacation_data[person1] = {}
             self.vacation_data[person1][p2_period] = vac_info
             self.save_db()
-            debug_lines.append(f"메모리: {person2}→{person1} 휴가 이동")
-        else:
-            debug_lines.append("메모리: 해당 턴에 휴가 없음")
 
         # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 ──
         if not self.sheet_connected or self.vac_holiday_ws is None:
-            debug_lines.append("시트 미연결 또는 휴가시트 없음 → 건너뜀")
-            return "\n".join(debug_lines)
+            return
 
         try:
-            # ① 전체 시트를 한 번만 읽기
             all_rows = self.vac_holiday_ws.get_all_values()
-            debug_lines.append(f"휴가시트 총 {len(all_rows)}행 읽기 완료")
 
-            # ② 헤더 행과 턴 컬럼 인덱스 찾기
+            # 헤더 행과 턴 컬럼 인덱스 찾기
             header_row_idx = name_col_idx = turn_col_idx = None
             for r_i, row in enumerate(all_rows):
                 for c_i, h in enumerate(row):
@@ -1460,14 +1443,10 @@ class DataManager:
                     break
 
             if header_row_idx is None or turn_col_idx is None:
-                headers = all_rows[header_row_idx] if header_row_idx is not None else []
-                debug_lines.append(f"헤더/컬럼 못 찾음! header_row={header_row_idx}, turn_col={turn_col_idx}")
-                debug_lines.append(f"헤더 내용: {headers[:15]}")
-                return "\n".join(debug_lines)
+                logging.warning(f"휴가시트 헤더/컬럼 못 찾음 (turn={turn})")
+                return
 
-            debug_lines.append(f"헤더: row={header_row_idx}, 이름col={name_col_idx}, '{turn}'col={turn_col_idx}")
-
-            # ③ person1, person2의 행 인덱스 찾기
+            # person1, person2의 행 인덱스 찾기
             p1_row = p2_row = None
             for r_i in range(header_row_idx + 1, len(all_rows)):
                 if name_col_idx < len(all_rows[r_i]):
@@ -1480,54 +1459,19 @@ class DataManager:
                     break
 
             if p1_row is None or p2_row is None:
-                debug_lines.append(f"인턴 못 찾음: {person1}→row={p1_row}, {person2}→row={p2_row}")
-                return "\n".join(debug_lines)
+                logging.warning(f"휴가시트 인턴 못 찾음: {person1}={p1_row}, {person2}={p2_row}")
+                return
 
-            # ④ 현재 셀 값 읽기
+            # 현재 셀 값 읽기 → 맞교환 쓰기
             cell1_val = all_rows[p1_row][turn_col_idx] if turn_col_idx < len(all_rows[p1_row]) else ''
             cell2_val = all_rows[p2_row][turn_col_idx] if turn_col_idx < len(all_rows[p2_row]) else ''
-            debug_lines.append(f"읽기: {person1}='{cell1_val}' / {person2}='{cell2_val}'")
 
-            # ⑤ 맞교환 쓰기
             api_col = turn_col_idx + 1
-            api_row1 = p1_row + 1
-            api_row2 = p2_row + 1
-            write1 = cell2_val if cell2_val else ""
-            write2 = cell1_val if cell1_val else ""
-            debug_lines.append(f"쓰기: {person1}←'{write1}' / {person2}←'{write2}'")
-
-            self.vac_holiday_ws.update_cell(api_row1, api_col, write1)
-            self.vac_holiday_ws.update_cell(api_row2, api_col, write2)
-            debug_lines.append("update_cell 완료")
-
-            # ⑥ 검증
-            import time
-            time.sleep(1)
-            verify = self.vac_holiday_ws.get_all_values()
-            v1_after = verify[p1_row][turn_col_idx] if turn_col_idx < len(verify[p1_row]) else '?'
-            v2_after = verify[p2_row][turn_col_idx] if turn_col_idx < len(verify[p2_row]) else '?'
-            debug_lines.append(f"검증: {person1}='{v1_after}' / {person2}='{v2_after}'")
-
-            if v1_after != write1 or v2_after != write2:
-                debug_lines.append("⚠️ 값이 덮어씌워졌습니다! 수식이 원인일 수 있음")
-                try:
-                    from gspread.utils import rowcol_to_a1
-                    a1_1 = rowcol_to_a1(api_row1, api_col)
-                    a1_2 = rowcol_to_a1(api_row2, api_col)
-                    fc1 = self.vac_holiday_ws.acell(a1_1, value_render_option='FORMULA').value
-                    fc2 = self.vac_holiday_ws.acell(a1_2, value_render_option='FORMULA').value
-                    debug_lines.append(f"수식: {person1}='{fc1}' / {person2}='{fc2}'")
-                except Exception as fe:
-                    debug_lines.append(f"수식 확인 실패: {fe}")
-            else:
-                debug_lines.append("검증 OK")
+            self.vac_holiday_ws.update_cell(p1_row + 1, api_col, cell2_val if cell2_val else "")
+            self.vac_holiday_ws.update_cell(p2_row + 1, api_col, cell1_val if cell1_val else "")
 
         except Exception as e:
-            debug_lines.append(f"오류: {e}")
-            import traceback
-            debug_lines.append(traceback.format_exc())
-
-        return "\n".join(debug_lines)
+            logging.error(f"휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
 
     # ── DB 로드 / 저장 ─────────────────────────────────────────────────────────
     def load_db(self):
@@ -1556,7 +1500,7 @@ class DataManager:
                             if k in saved_settings:
                                 self.admin_settings[k] = saved_settings[k]
                 except Exception as e:
-                    print(f"[ERROR] DB_FILE load failed: {e}")
+                    logging.error(f"DB load failed: {e}")
                     self.requests     = []
                     self.vacation_data = sheet_vac if sheet_vac else {}
             else:
@@ -1600,7 +1544,7 @@ class DataManager:
                 if len(rows) > 1:
                     self.history_ws.delete_rows(2, len(rows))
             except Exception as e:
-                print(f"교환이력 시트 초기화 실패: {e}")
+                logging.error(f"교환이력 시트 초기화 실패: {e}")
         return True, "✅ 모든 교환 요청 및 이력이 초기화되었습니다."
 
     # ── 유틸리티 ───────────────────────────────────────────────────────────────
@@ -2017,7 +1961,7 @@ class DataManager:
                 self.df.loc[p2, turn] = val_b
                 return False, "구글 시트 반영 오류. 취소됩니다."
 
-            vac_debug = self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
+            self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
 
             req['status'] = 'accepted'
             self.save_db()
@@ -2026,10 +1970,7 @@ class DataManager:
             self.auto_close_market_posts(p2, turn)
             self.auto_cancel_conflicting_requests(p1, turn, req['id'])
             self.auto_cancel_conflicting_requests(p2, turn, req['id'])
-            result_msg = f"✅ 관리자 승인 완료! ({val_a} ↔ {val_b})"
-            if vac_debug:
-                result_msg += f"\n\n📋 휴가시트:\n```\n{vac_debug}\n```"
-            return True, result_msg
+            return True, f"✅ 관리자 승인 완료! ({val_a} ↔ {val_b})"
 
         return False, "알 수 없는 동작입니다."
 
@@ -2212,21 +2153,16 @@ class DataManager:
                 return False, "구글 시트 반영 오류. 취소됩니다."
 
             # 휴가 데이터 + 시트 동기화 (스케줄 시트 반영 후 실행)
-            vac_debug = self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
+            self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
 
             req['status'] = 'accepted'
-
             self.save_db()
             self.log_history_to_sheet(p1, p2, turn, val_a, val_b, '수락됨')
-            # 장터 자동 완료 + 충돌 요청 자동 취소
             self.auto_close_market_posts(p1, turn)
             self.auto_close_market_posts(p2, turn)
             self.auto_cancel_conflicting_requests(p1, turn, req['id'])
             self.auto_cancel_conflicting_requests(p2, turn, req['id'])
-            result_msg = f"✅ 교환 완료! ({val_a} ↔ {val_b})"
-            if vac_debug:
-                result_msg += f"\n\n📋 휴가시트 동기화 상세:\n```\n{vac_debug}\n```"
-            return True, result_msg
+            return True, f"✅ 교환 완료! ({val_a} ↔ {val_b})"
 
         return False, "알 수 없는 동작입니다."
 
@@ -2423,7 +2359,7 @@ if 'user_id' not in st.session_state:
     col1, _ = st.columns([1, 2])
     with col1:
         input_id = st.text_input("이름 (예: 이규)", placeholder="이름 입력")
-        input_pw = st.text_input("비밀번호 (기본: 1234)", type="password")
+        input_pw = st.text_input("비밀번호", type="password")
         if st.button("로그인", type="primary"):
             input_id = input_id.strip()
             input_pw = input_pw.strip()
@@ -2922,7 +2858,7 @@ if user == 'ADMIN':
             target_pw = new_pw_adm.strip() if new_pw_adm.strip() else '1234'
             ok, msg = mgr.update_password_in_sheet(sel_user_pw, target_pw)
             if ok:
-                st.success(f"✅ {sel_user_pw}의 비밀번호가 **{target_pw}** 로 변경되었습니다.")
+                st.success(f"✅ {sel_user_pw}의 비밀번호가 변경되었습니다.")
             else:
                 st.error(msg)
 
@@ -3105,19 +3041,13 @@ if user == 'ADMIN':
                             if st.button("✅ 승인", key=f"adm_approve_{r['id']}", type="primary",
                                          use_container_width=True):
                                 ok, msg = mgr.admin_approve_request(r['id'], 'approve')
-                                if ok:
-                                    st.success(msg)
-                                else:
-                                    st.error(msg)
+                                st.toast(msg, icon="✅" if ok else "❌")
                                 st.rerun()
                         with bc2:
                             if st.button("❌ 거절", key=f"adm_reject_{r['id']}",
                                          use_container_width=True):
                                 ok, msg = mgr.admin_approve_request(r['id'], 'reject')
-                                if ok:
-                                    st.warning(msg)
-                                else:
-                                    st.error(msg)
+                                st.toast(msg, icon="✅" if ok else "❌")
                                 st.rerun()
 
             # ── 복합 교환 ──
@@ -3145,19 +3075,13 @@ if user == 'ADMIN':
                             if st.button("✅ 전체 승인", key=f"adm_ch_approve_{cid}", type="primary",
                                          use_container_width=True):
                                 ok, msg = mgr.admin_approve_chain(cid, 'approve')
-                                if ok:
-                                    st.success(msg)
-                                else:
-                                    st.error(msg)
+                                st.toast(msg, icon="✅" if ok else "❌")
                                 st.rerun()
                         with cc2:
                             if st.button("❌ 전체 거절", key=f"adm_ch_reject_{cid}",
                                          use_container_width=True):
                                 ok, msg = mgr.admin_approve_chain(cid, 'reject')
-                                if ok:
-                                    st.warning(msg)
-                                else:
-                                    st.error(msg)
+                                st.toast(msg, icon="✅" if ok else "❌")
                                 st.rerun()
 
     # ── 관리자 탭8: 교환 설정 ────────────────────────────────────────────────
@@ -3181,8 +3105,6 @@ if user == 'ADMIN':
                 st.rerun()
             else:
                 st.error(msg)
-
-        st.divider()
 
     st.stop()
 
@@ -3326,10 +3248,11 @@ with st.sidebar:
                     if ca.button("✅ 수락", key=f"sb_acc_{req['id']}", type="primary",
                                  use_container_width=True):
                         succ, msg = mgr.process_request(req['id'], 'accept')
-                        if succ: st.success(msg); st.rerun()
-                        else:    st.error(msg)
+                        st.toast(msg, icon="✅" if succ else "❌")
+                        st.rerun()
                     if cb.button("❌ 거절", key=f"sb_rej_{req['id']}", use_container_width=True):
                         mgr.process_request(req['id'], 'reject')
+                        st.toast("요청을 거절했습니다.", icon="❌")
                         st.rerun()
                     st.divider()
 
@@ -3362,14 +3285,12 @@ with st.sidebar:
                         last_succ, last_msg = False, ""
                         for r in my_chain_reqs:
                             last_succ, last_msg = mgr.process_chain_action(cid, r['id'], 'accept', user)
-                        if last_succ:
-                            st.success(last_msg)
-                        else:
-                            st.error(last_msg)
+                        st.toast(last_msg, icon="✅" if last_succ else "❌")
                         st.rerun()
                     if cb.button("❌ 거절", key=f"sb_chrej_{cid}", use_container_width=True):
                         for r in my_chain_reqs:
                             mgr.process_chain_action(cid, r['id'], 'reject', user)
+                        st.toast("복합 교환을 거절했습니다.", icon="❌")
                         st.rerun()
                     st.divider()
 
@@ -3691,7 +3612,7 @@ with st.sidebar:
 # ══════════════════════════════════════════════════════════════════════════════
 #  MAIN CONTENT
 # ══════════════════════════════════════════════════════════════════════════════
-st.title("🏥 차병원 인턴 턴표 교환소")
+st.title("🏥 인턴 턴표 교환 시스템")
 
 
 
