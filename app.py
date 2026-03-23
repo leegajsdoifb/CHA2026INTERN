@@ -1325,7 +1325,11 @@ class DataManager:
             return False
 
     def update_vacation_sheet_cell(self, intern_name, turn_key, new_value):
-        """휴가 시트의 특정 인턴·턴 셀을 업데이트한다."""
+        """
+        휴가 시트의 특정 인턴·턴 셀의 과목명을 교환한다.
+        기존 셀에 휴가 표시(예: B-4)가 있으면 보존한다.
+        예: 기존 'IM\\nB-4' + new_value='GS(구미)' → 'GS(구미)\\nB-4'
+        """
         if not self.sheet_connected or self.vac_holiday_ws is None:
             return False
         try:
@@ -1346,7 +1350,25 @@ class DataManager:
                     break
             if turn_col_idx is None:
                 return False
-            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, new_value if new_value else "")
+
+            # 기존 셀 값 읽기
+            old_cell = all_rows[row_idx - 1][turn_col_idx - 1] if turn_col_idx - 1 < len(all_rows[row_idx - 1]) else ''
+            vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
+
+            # 기존 셀에서 휴가 표시(B-4 등) 추출
+            vac_marker = None
+            if old_cell:
+                for line in old_cell.split('\n'):
+                    if vac_pattern.match(line.strip()):
+                        vac_marker = line.strip()
+                        break
+
+            # 새 값 구성: 과목명 + 기존 휴가 표시 보존
+            final_value = new_value if new_value else ''
+            if vac_marker and final_value:
+                final_value = f"{final_value}\n{vac_marker}"
+
+            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, final_value)
             return True
         except Exception as e:
             print(f"휴가 시트 업데이트 실패 ({intern_name}): {e}")
@@ -2344,8 +2366,8 @@ if user == 'ADMIN':
     st.caption(f"인턴 수: **{len(mgr.df)}명** | 턴 수: **{len(mgr.df.columns)}개**")
 
     adm_tab1, adm_tab2, adm_tab6, adm_tab9, adm_tab3, adm_tab4, adm_tab5, adm_tab7, adm_tab8 = st.tabs([
-        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "🏭 구미 교환 승인",
-        "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "⚙️ 교환 설정"
+        "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "구미 교환 승인",
+        "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "교환 설정"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -2692,7 +2714,7 @@ if user == 'ADMIN':
                 'pending': '⏳ 대기중', 'accepted': '✅ 수락', 'rejected': '❌ 거절',
                 'cancelled': '🚫 취소', 'chain_accepted': '🔗 체인수락',
                 'chain_rejected': '🔗 체인거절', 'error': '⚠️ 오류',
-                'admin_pending': '🏭 관리자승인대기', 'admin_rejected': '🏭 관리자거절',
+                'admin_pending': '관리자승인대기', 'admin_rejected': '관리자거절',
             }
             sel_statuses = st.multiselect(
                 "상태 필터", all_statuses,
@@ -2925,7 +2947,7 @@ if user == 'ADMIN':
 
     # ── 관리자 탭9: 구미 교환 승인 ──────────────────────────────────────────
     with adm_tab9:
-        st.subheader("🏭 구미 교환 관리자 승인")
+        st.subheader("구미 교환 관리자 승인")
         st.caption("구미 지역이 포함된 교환은 상대방 수락 후에도 관리자 최종 승인이 필요합니다.")
 
         # admin_pending 상태 요청 수집
@@ -3029,7 +3051,7 @@ if user == 'ADMIN':
 
     # ── 관리자 탭8: 교환 설정 ────────────────────────────────────────────────
     with adm_tab8:
-        st.subheader("⚙️ 교환 규칙 설정")
+        st.subheader("교환 규칙 설정")
         st.caption("교환 시스템의 규칙을 확인할 수 있습니다.")
 
         st.divider()
@@ -3168,7 +3190,7 @@ with st.sidebar:
                     if req.get('message'):
                         st.info(f"💬 {req['message']}")
                     if mgr._involves_gumi(snd_v, my_v):
-                        st.caption("🏭 구미 교환 — 수락 후 관리자 최종 승인 필요")
+                        st.caption("구미 교환 — 수락 후 관리자 최종 승인 필요")
                     ca, cb = st.columns(2)
                     if ca.button("✅ 수락", key=f"sb_acc_{req['id']}", type="primary",
                                  use_container_width=True):
@@ -3224,7 +3246,7 @@ with st.sidebar:
             else:
                 lbl_sb = {'pending': '⏳', 'accepted': '✅', 'rejected': '❌',
                           'cancelled': '🚫', 'chain_accepted': '🔗✅', 'chain_rejected': '🔗❌',
-                          'admin_pending': '🏭⏳', 'admin_rejected': '🏭❌'}
+                          'admin_pending': '⏳(관리자)', 'admin_rejected': '❌(관리자)'}
                 # 체인 그룹 표시
                 shown_chains = set()
                 for r in reversed(sent_all_sb):
@@ -3240,7 +3262,7 @@ with st.sidebar:
                         elif any(s in ('chain_rejected', 'admin_rejected') for s in statuses):
                             chain_icon = "❌"
                         elif any(s == 'admin_pending' for s in statuses):
-                            chain_icon = "🏭⏳"
+                            chain_icon = "⏳(관리자)"
                         elif any(s == 'chain_accepted' for s in statuses):
                             chain_icon = "🔗⏳"
                         else:
@@ -3265,7 +3287,7 @@ with st.sidebar:
                         if r.get('message'):
                             st.caption(f"💬 {r['message']}")
                         if r['status'] == 'admin_pending':
-                            st.info("🏭 구미 교환 — 관리자 최종 승인 대기 중")
+                            st.info("구미 교환 — 관리자 최종 승인 대기 중")
                         if r['status'] == 'pending':
                             if st.button("취소", key=f"sb_cancel_{r['id']}", use_container_width=True):
                                 ok, msg = mgr.cancel_request(r['id'], user)
@@ -3519,7 +3541,7 @@ def quick_confirm_dialog():
     )
     # 구미 포함 시 관리자 승인 필요 고지
     if mgr._involves_gumi(qc.get('my_val', ''), qc.get('partner_val', '')):
-        st.warning("🏭 **구미 지역 교환** — 상대방 수락 후 **관리자 최종 승인**이 필요합니다.")
+        st.warning("**구미 지역 교환** — 상대방 수락 후 **관리자 최종 승인**이 필요합니다.")
     qc_message = st.text_input(
         "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
         key="qc_dlg_msg", max_chars=100
@@ -3556,7 +3578,7 @@ def multi_confirm_dialog():
         for it in items
     )
     if _has_gumi_in_multi:
-        st.warning("🏭 **구미 지역 교환 포함** — 전원 수락 후 **관리자 최종 승인**이 필요합니다.")
+        st.warning("**구미 지역 교환 포함** — 전원 수락 후 **관리자 최종 승인**이 필요합니다.")
     # 각 항목 표시 + 상대방별 메시지 입력
     mc_messages = {}
     for i, it in enumerate(items):
