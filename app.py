@@ -483,6 +483,12 @@ class DataManager:
             if not poster_val or not viewer_val or poster_val == viewer_val:
                 continue
 
+            # 진로선택/진로탐색 교환 불가
+            _, dept_poster = self.parse_cell(poster_val)
+            _, dept_viewer = self.parse_cell(viewer_val)
+            if dept_poster in ('진로선택', '진로탐색') or dept_viewer in ('진로선택', '진로탐색'):
+                continue
+
             # 받고싶은 과목 필터 (과목 지정 모드): poster가 받는 값(= viewer_val)이 want_dept_vals에 포함돼야 함
             if want_dept_vals:
                 if viewer_val not in want_dept_vals:
@@ -3412,7 +3418,11 @@ with tab_browse:
                     st.info(f"💬 {post_msg}")
                 st.caption(f"📅 등록: {post_time}")
                 if not compatibilities:
-                    st.warning("교환 가능한 조합이 없거나 데이터가 부족합니다.")
+                    # 왜 매칭이 안 되는지 안내
+                    if want_str and want_str != '무관':
+                        st.warning(f"내 해당 턴에 **{want_str}** 과목이 없어서 매칭되지 않습니다.")
+                    else:
+                        st.warning("교환 가능한 조합이 없습니다. (동일 값이거나 교환 불가 과목)")
                 else:
                     for combo in compatibilities:
                         t        = combo['turn']
