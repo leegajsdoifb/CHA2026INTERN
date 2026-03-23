@@ -2040,8 +2040,13 @@ class DataManager:
         if action == 'reject':
             for r in chain_reqs:
                 r['status'] = 'admin_rejected'
+                # 건별 이력 기록
+                rcv = r['receiver']
+                t = r['turn']
+                va = r.get('val_sender', '')
+                vb = r.get('val_receiver', '')
+                self.log_history_to_sheet(sender, rcv, t, va, vb, '관리자거절(복합)')
             self.save_db()
-            self.log_history_to_sheet(sender, '', '', '', '', '관리자거절(복합)')
             return True, "관리자가 복합 교환을 거절했습니다."
 
         if action == 'approve':
@@ -2099,12 +2104,12 @@ class DataManager:
                 r['status'] = 'accepted'
                 self.auto_close_market_posts(sender, t)
                 self.auto_close_market_posts(rcv, t)
-            # 스케줄 시트 반영 후 휴가 시트 동기화
+            # 스케줄 시트 반영 후 휴가 시트 동기화 + 건별 이력 기록
             for s, rcv, t, va, vb in exchange_pairs:
                 self.sync_vacation_sheet_for_exchange(s, rcv, t, vb, va)
+                self.log_history_to_sheet(s, rcv, t, va, vb, '관리자승인(복합)')
 
             self.save_db()
-            self.log_history_to_sheet(sender, '', '', '', '', '관리자승인(복합)')
             return True, f"✅ 관리자 승인 완료! 복합 교환 {len(chain_reqs)}건 실행"
 
         return False, "알 수 없는 동작입니다."
