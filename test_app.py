@@ -738,11 +738,13 @@ class TestSwapVacationData(unittest.TestCase):
         self.assertEqual(self.dm.vacation_data['A']['1차']['type'], 'D-3')
         self.assertEqual(self.dm.vacation_data['D']['1차']['type'], 'A-3')
 
-    def test_one_missing_no_swap(self):
-        """A(4턴 휴가)↔B(4턴 비휴가): 교환 없음."""
-        orig_a = self.dm.vacation_data['A']['1차']['type']
+    def test_one_has_vacation_moves_to_other(self):
+        """A(4턴 휴가)↔B(4턴 비휴가): A의 휴가가 B에게 이동."""
+        orig_a_type = self.dm.vacation_data['A']['1차']['type']
         self.dm.sync_vacation_sheet_for_exchange('A', 'B', '4턴', 'x', 'y')
-        self.assertEqual(self.dm.vacation_data['A']['1차']['type'], orig_a)
+        # A의 1차 휴가가 B에게 이동
+        self.assertNotIn('1차', self.dm.vacation_data.get('A', {}))
+        self.assertEqual(self.dm.vacation_data['B']['1차']['type'], orig_a_type)
 
     def test_neither_has_vacation_no_swap(self):
         """비휴가 턴: 아무 변화 없음."""

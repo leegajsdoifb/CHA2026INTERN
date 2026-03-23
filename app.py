@@ -1352,25 +1352,15 @@ class DataManager:
 
     def sync_vacation_sheet_for_exchange(self, person1, person2, turn, new_val_p1, new_val_p2):
         """
-        교환 시 휴가 시트를 한 번에 동기화한다.
-        1) 휴가 셀을 한 번 읽어서 마커(B-4 등) 추출
-        2) 양쪽 모두 휴가인 경우 타입(A/B/C) 교환 처리
-        3) 과목값 교환 + 마커 보존하여 최종 셀 값을 한 번만 쓴다.
+        교환 시 휴가 시트를 동기화한다.
+        핵심 원리: 휴가 시트의 셀 값 전체를 그대로 맞교환한다.
+        (과목 + 휴가마커(A-4, B-3 등) 모두 포함하여 통째로 스왑)
 
-        new_val_p1: person1이 받게 될 새 과목값 (스케줄 시트 기준)
-        new_val_p2: person2가 받게 될 새 과목값 (스케줄 시트 기준)
+        예) 정수빈 4턴 'IM\\nA-4' ↔ 이규 4턴 'EMC(소아)\\nB-3'
+        → 정수빈 4턴에 'EMC(소아)\\nB-3', 이규 4턴에 'IM\\nA-4' 기록
         """
-        vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
-
-        def _extract_marker(cell_val):
-            if not cell_val:
-                return None
-            for line in cell_val.split('\n'):
-                if vac_pattern.match(line.strip()):
-                    return line.strip()
-            return None
-
-        # ── 1단계: vacation_data 메모리 갱신 (둘 다 휴가인 경우 타입 교환) ──
+        # ── 1단계: vacation_data 메모리 갱신 ──
+        # 해당 턴에 휴가가 있는 경우, 휴가 정보도 맞교환
         v1 = self.vacation_data.get(person1, {})
         v2 = self.vacation_data.get(person2, {})
         p1_period = p2_period = None
@@ -1382,48 +1372,39 @@ class DataManager:
             if vi and vi.get('turn') == turn:
                 p2_period = period
 
+        # 양쪽 모두 해당 턴에 휴가가 있으면 타입 교환
         if p1_period and p2_period:
-            # 둘 다 휴가 → 타입 교환
             p1_type = v1[p1_period]['type']
             p2_type = v2[p2_period]['type']
             v1[p1_period]['type'] = p2_type
             v2[p2_period]['type'] = p1_type
             self.save_db()
+        # 한쪽만 휴가인 경우: 휴가가 상대에게 이동
+        elif p1_period and not p2_period:
+            vac_info = v1.pop(p1_period)
+            if person2 not in self.vacation_data:
+                self.vacation_data[person2] = {}
+            self.vacation_data[person2][p1_period] = vac_info
+            self.save_db()
+        elif p2_period and not p1_period:
+            vac_info = v2.pop(p2_period)
+            if person1 not in self.vacation_data:
+                self.vacation_data[person1] = {}
+            self.vacation_data[person1][p2_period] = vac_info
+            self.save_db()
 
-        # ── 2단계: 휴가 시트 갱신 (읽기 1회 → 계산 → 쓰기 1회) ──
+        # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 ──
         if not self.sheet_connected or self.vac_holiday_ws is None:
             return
 
         try:
-            # 셀 값 한 번만 읽기
+            # 양쪽 셀 값을 한 번에 읽기
             cell1_raw = self._get_vacation_cell_value(person1, turn)
             cell2_raw = self._get_vacation_cell_value(person2, turn)
 
-            marker1 = _extract_marker(cell1_raw)  # person1의 기존 마커
-            marker2 = _extract_marker(cell2_raw)  # person2의 기존 마커
-
-            # 둘 다 휴가인 경우: 마커도 교환 (타입 교환 반영)
-            if p1_period and p2_period and marker1 and marker2:
-                # person1은 person2의 타입을 받고, person2는 person1의 타입을 받음
-                final_marker1 = marker2  # person2의 원래 마커 → person1에게
-                final_marker2 = marker1  # person1의 원래 마커 → person2에게
-            else:
-                # 한쪽만 또는 양쪽 모두 비휴가 → 각자의 마커 유지
-                final_marker1 = marker1
-                final_marker2 = marker2
-
-            # 최종 셀 값: 새 과목 + 마커
-            final1 = new_val_p1 or ''
-            if final_marker1 and final1:
-                final1 = f"{final1}\n{final_marker1}"
-
-            final2 = new_val_p2 or ''
-            if final_marker2 and final2:
-                final2 = f"{final2}\n{final_marker2}"
-
-            # 한 번만 쓰기
-            self.update_vacation_sheet_cell(person1, turn, final1)
-            self.update_vacation_sheet_cell(person2, turn, final2)
+            # person1 자리에 person2의 원래 값, person2 자리에 person1의 원래 값
+            self.update_vacation_sheet_cell(person1, turn, cell2_raw if cell2_raw else "")
+            self.update_vacation_sheet_cell(person2, turn, cell1_raw if cell1_raw else "")
         except Exception as e:
             print(f"휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
 
