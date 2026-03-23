@@ -58,6 +58,7 @@ class DataManager:
         self.history_ws  = None
         self.market_ws   = None
         self.vac_holiday_ws  = None
+        self.login_log_ws = None
         self.passwords   = {}
         self.market_posts = []
         self.vacation_data = {}   # {이름: {'1차': {'turn':X,'type':Y}, '2차': {'turn':X,'type':Y}}}
@@ -674,7 +675,7 @@ class DataManager:
                 _, d_pt = self.parse_cell(partner_val)
                 if d_my in ('진로선택', '진로탐색') or d_pt in ('진로선택', '진로탐색'):
                     continue
-                if partner_val != target_dept:
+                if d_pt != target_dept:
                     continue
                 # 교환 검증
                 sa = self.df.loc[name].copy()
@@ -1232,7 +1233,6 @@ class DataManager:
                 self.save_db()
                 return False, "⚠️ 구글 시트 반영 중 오류가 발생했습니다."
 
-            chain_req_ids = {r['id'] for r in chain_reqs}
             for r in chain_reqs:
                 r['status'] = 'accepted'
                 self.log_history_to_sheet(
@@ -1497,48 +1497,6 @@ class DataManager:
 
         return "\n".join(debug_lines)
 
-    def _get_vacation_cell_value(self, intern_name, turn_key):
-        """휴가 시트에서 특정 인턴·턴의 셀 값을 읽는다."""
-        try:
-            cell = self.vac_holiday_ws.find(intern_name)
-            row_idx = cell.row
-            all_rows = self.vac_holiday_ws.get_all_values()
-            header_row_num = turn_col_idx = None
-            for r_i, row in enumerate(all_rows):
-                for c_i, h in enumerate(row):
-                    if '성명' in h or '이름' in h:
-                        header_row_num = r_i + 1
-                        break
-                if header_row_num:
-                    for c_i, h in enumerate(all_rows[header_row_num - 1]):
-                        if h.strip() == turn_key.strip():
-                            turn_col_idx = c_i
-                            break
-                    break
-            if turn_col_idx is None:
-                print(f"[VAC_READ] 컬럼 '{turn_key}' 못 찾음! 헤더: {all_rows[header_row_num-1] if header_row_num else 'N/A'}")
-                return None
-            val = all_rows[row_idx - 1][turn_col_idx]
-            print(f"[VAC_READ] {intern_name}({turn_key}) row={row_idx} col={turn_col_idx} → '{val}'")
-            return val
-        except Exception as e:
-            print(f"[ERROR] _get_vac_cell failed ({intern_name}, {turn_key}): {e}")
-            import traceback; traceback.print_exc()
-            return None
-
-    @staticmethod
-    def _replace_vac_type_in_cell(cell_value, old_type, new_type):
-        """셀 값에서 휴가 타입만 교체. 'IM\\nA-3' → 'IM\\nB-4'"""
-        lines = cell_value.split('\n')
-        vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
-        result = []
-        for line in lines:
-            if vac_pattern.match(line.strip()):
-                result.append(new_type)
-            else:
-                result.append(line)
-        return '\n'.join(result)
-
     # ── DB 로드 / 저장 ─────────────────────────────────────────────────────────
     def load_db(self):
         # 시트 연결이 끊어졌거나 휴가 시트가 없으면 재연결 시도
@@ -1598,6 +1556,20 @@ class DataManager:
         }
         with open(DB_FILE, 'w', encoding='utf-8') as f:
             json.dump(db, f, ensure_ascii=False, indent=4)
+
+    def reset_all_requests_and_history(self):
+        """모든 교환 요청 + 교환이력 시트 초기화."""
+        self.requests = []
+        self.save_db()
+        # 교환이력 시트 초기화 (헤더만 남김)
+        if self.sheet_connected and self.history_ws is not None:
+            try:
+                rows = self.history_ws.get_all_values()
+                if len(rows) > 1:
+                    self.history_ws.delete_rows(2, len(rows))
+            except Exception as e:
+                print(f"교환이력 시트 초기화 실패: {e}")
+        return True, "✅ 모든 교환 요청 및 이력이 초기화되었습니다."
 
     # ── 유틸리티 ───────────────────────────────────────────────────────────────
     def parse_cell(self, cell_value):
@@ -2085,6 +2057,12 @@ class DataManager:
             if errors:
                 for r in chain_reqs:
                     r['status'] = 'admin_rejected'
+                    rcv = r['receiver']
+                    t = r['turn']
+                    va = r.get('val_sender', '')
+                    vb = r.get('val_receiver', '')
+                    self.log_history_to_sheet(sender, rcv, t, va, vb,
+                                              '관리자거절(복합)', '승인 시점 재검증 실패')
                 self.save_db()
                 return False, "⚠️ 관리자 승인 시점 재검증 실패:\n" + "\n".join(errors)
 
@@ -2461,7 +2439,7 @@ if user == 'ADMIN':
 
     adm_tab1, adm_tab2, adm_tab6, adm_tab9, adm_tab3, adm_tab4, adm_tab5, adm_tab7, adm_tab8 = st.tabs([
         "📊 스케줄 통계", "📋 전체 스케줄", "🏖️ 휴가 현황", "구미 교환 승인",
-        "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "교환 설정"
+        "🔄 교환 이력", "📝 장터 현황", "🔑 비밀번호 관리", "🔐 로그인 이력", "🗑️ 데이터 관리"
     ])
 
     # ── 관리자 탭1: 스케줄 통계 ────────────────────────────────────────────────
@@ -3145,14 +3123,25 @@ if user == 'ADMIN':
 
     # ── 관리자 탭8: 교환 설정 ────────────────────────────────────────────────
     with adm_tab8:
-        st.subheader("교환 규칙 설정")
-        st.caption("교환 시스템의 규칙을 확인할 수 있습니다.")
+        st.subheader("데이터 관리")
 
-        st.divider()
+        st.markdown("#### 교환 요청 · 이력 전체 초기화")
+        st.caption("모든 교환 요청(대기/승인/거절 포함)과 교환이력 시트를 일괄 삭제합니다.")
 
-        # ── 진로선택/진로탐색 교환 불가 (항상 활성) ──
-        st.markdown("#### 진로선택 · 진로탐색 교환 불가")
-        st.info("🔒 진로선택 · 진로탐색 과목은 **항상** 교환이 차단됩니다. (변경 불가)")
+        total_reqs = len(mgr.requests)
+        pending_n = sum(1 for r in mgr.requests if r.get('status') in ('pending', 'chain_accepted', 'admin_pending'))
+        st.info(f"현재 요청 **{total_reqs}**건 (대기 중 {pending_n}건)")
+
+        # 2단계 확인: 체크박스 + 버튼
+        confirm_reset = st.checkbox("⚠️ 모든 요청과 이력을 삭제하겠습니다", key="adm_reset_confirm")
+        if st.button("🗑️ 전체 초기화", type="primary", disabled=not confirm_reset,
+                      use_container_width=True, key="adm_reset_btn"):
+            ok, msg = mgr.reset_all_requests_and_history()
+            if ok:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
 
         st.divider()
 
@@ -3331,10 +3320,13 @@ with st.sidebar:
                     my_chain_reqs = [r for r in reqs if r['status'] == 'pending']
                     if ca.button("✅ 수락", key=f"sb_chacc_{cid}", type="primary",
                                  use_container_width=True):
-                        last_msg = ""
+                        last_succ, last_msg = False, ""
                         for r in my_chain_reqs:
-                            succ, last_msg = mgr.process_chain_action(cid, r['id'], 'accept', user)
-                        st.success(last_msg)
+                            last_succ, last_msg = mgr.process_chain_action(cid, r['id'], 'accept', user)
+                        if last_succ:
+                            st.success(last_msg)
+                        else:
+                            st.error(last_msg)
                         st.rerun()
                     if cb.button("❌ 거절", key=f"sb_chrej_{cid}", use_container_width=True):
                         for r in my_chain_reqs:
@@ -3520,7 +3512,8 @@ with st.sidebar:
         all_sv = sorted(set(
             str(v).strip() for col in mgr.df.columns
             for v in mgr.df[col].dropna()
-            if v and str(v).strip() not in ('None', '', '예비턴')
+            if v and str(v).strip() not in ('None', '', '예비턴', '진로선택', '진로탐색')
+            and '진로선택' not in str(v) and '진로탐색' not in str(v)
         )) if not mgr.df.empty else []
         if all_sv:
             target_vs = st.multiselect("받고 싶은 과목/턴 (복수 선택 가능)", all_sv, key="sim_val_sel")

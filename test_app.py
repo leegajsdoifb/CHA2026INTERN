@@ -896,24 +896,6 @@ class TestCancelRequest(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TestReplaceVacTypeInCell
-# ══════════════════════════════════════════════════════════════════════════════
-class TestReplaceVacTypeInCell(unittest.TestCase):
-
-    def test_simple_replace(self):
-        result = DataManager._replace_vac_type_in_cell('IM\nA-3', 'A-3', 'B-4')
-        self.assertEqual(result, 'IM\nB-4')
-
-    def test_no_match_unchanged(self):
-        result = DataManager._replace_vac_type_in_cell('IM', 'A-3', 'B-4')
-        self.assertEqual(result, 'IM')
-
-    def test_multi_line(self):
-        result = DataManager._replace_vac_type_in_cell('GS(분당)\nC-1', 'C-1', 'D-2')
-        self.assertEqual(result, 'GS(분당)\nD-2')
-
-
-# ══════════════════════════════════════════════════════════════════════════════
 #  TestEdgeCases
 # ══════════════════════════════════════════════════════════════════════════════
 class TestEdgeCases(unittest.TestCase):
