@@ -1219,8 +1219,8 @@ class DataManager:
                 if self.sheet_connected:
                     ok1 = self.update_sheet_cell(sender, r['turn'], val_b)
                     ok2 = self.update_sheet_cell(r['receiver'], r['turn'], val_a)
-                    self.update_vacation_sheet_cell(sender, r['turn'], val_b)
-                    self.update_vacation_sheet_cell(r['receiver'], r['turn'], val_a)
+                    self.update_vacation_dept_only(sender, r['turn'], val_b)
+                    self.update_vacation_dept_only(r['receiver'], r['turn'], val_a)
                     if not (ok1 and ok2):
                         sheet_ok = False
 
@@ -1325,11 +1325,7 @@ class DataManager:
             return False
 
     def update_vacation_sheet_cell(self, intern_name, turn_key, new_value):
-        """
-        휴가 시트의 특정 인턴·턴 셀의 과목명을 교환한다.
-        기존 셀에 휴가 표시(예: B-4)가 있으면 보존한다.
-        예: 기존 'IM\\nB-4' + new_value='GS(구미)' → 'GS(구미)\\nB-4'
-        """
+        """휴가 시트의 특정 인턴·턴 셀을 그대로 덮어쓴다 (swap_vacation_data 전용)."""
         if not self.sheet_connected or self.vac_holiday_ws is None:
             return False
         try:
@@ -1350,28 +1346,40 @@ class DataManager:
                     break
             if turn_col_idx is None:
                 return False
+            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, new_value if new_value else "")
+            return True
+        except Exception as e:
+            print(f"휴가 시트 업데이트 실패 ({intern_name}): {e}")
+            return False
 
-            # 기존 셀 값 읽기
-            old_cell = all_rows[row_idx - 1][turn_col_idx - 1] if turn_col_idx - 1 < len(all_rows[row_idx - 1]) else ''
-            vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
+    def update_vacation_dept_only(self, intern_name, turn_key, new_dept_value):
+        """
+        휴가 시트에서 과목명만 교환하고, 기존 휴가 표시(B-4 등)는 보존한다.
+        예: 기존 'IM\\nB-4' + new_dept_value='GS(구미)' → 'GS(구미)\\nB-4'
+        """
+        if not self.sheet_connected or self.vac_holiday_ws is None:
+            return False
+        try:
+            # 현재 셀 값 읽기
+            current = self._get_vacation_cell_value(intern_name, turn_key)
 
-            # 기존 셀에서 휴가 표시(B-4 등) 추출
+            # 기존 셀에서 휴가 표시 추출
             vac_marker = None
-            if old_cell:
-                for line in old_cell.split('\n'):
+            if current:
+                vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
+                for line in current.split('\n'):
                     if vac_pattern.match(line.strip()):
                         vac_marker = line.strip()
                         break
 
-            # 새 값 구성: 과목명 + 기존 휴가 표시 보존
-            final_value = new_value if new_value else ''
-            if vac_marker and final_value:
-                final_value = f"{final_value}\n{vac_marker}"
+            # 새 값: 과목명 + 기존 휴가 표시 보존
+            final = new_dept_value if new_dept_value else ''
+            if vac_marker and final:
+                final = f"{final}\n{vac_marker}"
 
-            self.vac_holiday_ws.update_cell(row_idx, turn_col_idx, final_value)
-            return True
+            return self.update_vacation_sheet_cell(intern_name, turn_key, final)
         except Exception as e:
-            print(f"휴가 시트 업데이트 실패 ({intern_name}): {e}")
+            print(f"휴가 시트 과목 업데이트 실패 ({intern_name}): {e}")
             return False
 
     def swap_vacation_data(self, person1, person2, turn):
@@ -1923,8 +1931,8 @@ class DataManager:
             if self.sheet_connected:
                 ok1 = self.update_sheet_cell(p1, turn, val_b)
                 ok2 = self.update_sheet_cell(p2, turn, val_a)
-                self.update_vacation_sheet_cell(p1, turn, val_b)
-                self.update_vacation_sheet_cell(p2, turn, val_a)
+                self.update_vacation_dept_only(p1, turn, val_b)
+                self.update_vacation_dept_only(p2, turn, val_a)
                 sheet_ok = ok1 and ok2
 
             if not sheet_ok:
@@ -2009,8 +2017,8 @@ class DataManager:
                 if self.sheet_connected:
                     self.update_sheet_cell(sender, t, vb)
                     self.update_sheet_cell(rcv, t, va)
-                    self.update_vacation_sheet_cell(sender, t, vb)
-                    self.update_vacation_sheet_cell(rcv, t, va)
+                    self.update_vacation_dept_only(sender, t, vb)
+                    self.update_vacation_dept_only(rcv, t, va)
                 r['status'] = 'accepted'
                 self.auto_close_market_posts(sender, t)
                 self.auto_close_market_posts(rcv, t)
@@ -2099,9 +2107,9 @@ class DataManager:
                 with st.spinner('구글 시트에 반영 중입니다...'):
                     ok1 = self.update_sheet_cell(p1, turn, val_b)
                     ok2 = self.update_sheet_cell(p2, turn, val_a)
-                    # 휴가 시트에도 과목 값 교환
-                    self.update_vacation_sheet_cell(p1, turn, val_b)
-                    self.update_vacation_sheet_cell(p2, turn, val_a)
+                    # 휴가 시트에도 과목 값 교환 (휴가 표시 보존)
+                    self.update_vacation_dept_only(p1, turn, val_b)
+                    self.update_vacation_dept_only(p2, turn, val_a)
                     sheet_ok = ok1 and ok2
 
             if not sheet_ok:
