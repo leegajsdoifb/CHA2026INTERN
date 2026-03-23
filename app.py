@@ -1219,6 +1219,8 @@ class DataManager:
                 if self.sheet_connected:
                     ok1 = self.update_sheet_cell(sender, r['turn'], val_b)
                     ok2 = self.update_sheet_cell(r['receiver'], r['turn'], val_a)
+                    self.update_vacation_sheet_cell(sender, r['turn'], val_b)
+                    self.update_vacation_sheet_cell(r['receiver'], r['turn'], val_a)
                     if not (ok1 and ok2):
                         sheet_ok = False
 
@@ -1899,6 +1901,8 @@ class DataManager:
             if self.sheet_connected:
                 ok1 = self.update_sheet_cell(p1, turn, val_b)
                 ok2 = self.update_sheet_cell(p2, turn, val_a)
+                self.update_vacation_sheet_cell(p1, turn, val_b)
+                self.update_vacation_sheet_cell(p2, turn, val_a)
                 sheet_ok = ok1 and ok2
 
             if not sheet_ok:
@@ -1983,6 +1987,8 @@ class DataManager:
                 if self.sheet_connected:
                     self.update_sheet_cell(sender, t, vb)
                     self.update_sheet_cell(rcv, t, va)
+                    self.update_vacation_sheet_cell(sender, t, vb)
+                    self.update_vacation_sheet_cell(rcv, t, va)
                 r['status'] = 'accepted'
                 self.auto_close_market_posts(sender, t)
                 self.auto_close_market_posts(rcv, t)
@@ -2063,7 +2069,7 @@ class DataManager:
             # 교환 실행
             self.df.loc[p1, turn] = val_b
             self.df.loc[p2, turn] = val_a
-            # 휴가 시트 동기화
+            # 휴가 시트 동기화 (타입 교환 + 과목 값 교환)
             self.swap_vacation_data(p1, p2, turn)
 
             sheet_ok = True
@@ -2071,6 +2077,9 @@ class DataManager:
                 with st.spinner('구글 시트에 반영 중입니다...'):
                     ok1 = self.update_sheet_cell(p1, turn, val_b)
                     ok2 = self.update_sheet_cell(p2, turn, val_a)
+                    # 휴가 시트에도 과목 값 교환
+                    self.update_vacation_sheet_cell(p1, turn, val_b)
+                    self.update_vacation_sheet_cell(p2, turn, val_a)
                     sheet_ok = ok1 and ok2
 
             if not sheet_ok:
@@ -3158,6 +3167,8 @@ with st.sidebar:
                     st.caption(f"상대: `{snd_v}` ↔ 나: `{my_v}`  _{req.get('timestamp', '')[:10]}_")
                     if req.get('message'):
                         st.info(f"💬 {req['message']}")
+                    if mgr._involves_gumi(snd_v, my_v):
+                        st.caption("🏭 구미 교환 — 수락 후 관리자 최종 승인 필요")
                     ca, cb = st.columns(2)
                     if ca.button("✅ 수락", key=f"sb_acc_{req['id']}", type="primary",
                                  use_container_width=True):
@@ -3506,6 +3517,9 @@ def quick_confirm_dialog():
         f"**{_qc_tlbl}** 턴\n\n"
         f"나: `{qc.get('my_val', '?')}` ↔ **{qc.get('receiver', '?')}**: `{qc.get('partner_val', '?')}`"
     )
+    # 구미 포함 시 관리자 승인 필요 고지
+    if mgr._involves_gumi(qc.get('my_val', ''), qc.get('partner_val', '')):
+        st.warning("🏭 **구미 지역 교환** — 상대방 수락 후 **관리자 최종 승인**이 필요합니다.")
     qc_message = st.text_input(
         "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
         key="qc_dlg_msg", max_chars=100
@@ -3536,6 +3550,13 @@ def multi_confirm_dialog():
         st.rerun()
         return
     st.write(f"다음 교환 **{len(items)}건**을 신청합니다:")
+    # 구미 포함 시 관리자 승인 필요 고지
+    _has_gumi_in_multi = any(
+        mgr._involves_gumi(it.get('my_val', ''), it.get('partner_val', ''))
+        for it in items
+    )
+    if _has_gumi_in_multi:
+        st.warning("🏭 **구미 지역 교환 포함** — 전원 수락 후 **관리자 최종 승인**이 필요합니다.")
     # 각 항목 표시 + 상대방별 메시지 입력
     mc_messages = {}
     for i, it in enumerate(items):
