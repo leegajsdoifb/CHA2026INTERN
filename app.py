@@ -1204,8 +1204,9 @@ class DataManager:
                 self.save_db()
                 return True, "⏳ 구미 관련 복합 교환입니다. 전원 수락 완료, **관리자 최종 승인** 대기 중입니다."
 
-            # 일괄 실행
+            # 일괄 실행: 스케줄 시트 먼저 → 휴가 시트 나중에
             sheet_ok = True
+            exchange_pairs = []  # (sender, receiver, turn, val_a, val_b)
             for r in chain_reqs:
                 _turn = r['turn']
                 if sender not in self.df.index or r['receiver'] not in self.df.index or _turn not in self.df.columns:
@@ -1214,13 +1215,15 @@ class DataManager:
                 val_b = self.df.loc[r['receiver'], _turn]
                 self.df.loc[sender, r['turn']] = val_b
                 self.df.loc[r['receiver'], r['turn']] = val_a
-                # 휴가 데이터 + 시트 동기화 (읽기1회→쓰기1회)
-                self.sync_vacation_sheet_for_exchange(sender, r['receiver'], r['turn'], val_b, val_a)
+                exchange_pairs.append((sender, r['receiver'], r['turn'], val_a, val_b))
                 if self.sheet_connected:
                     ok1 = self.update_sheet_cell(sender, r['turn'], val_b)
                     ok2 = self.update_sheet_cell(r['receiver'], r['turn'], val_a)
                     if not (ok1 and ok2):
                         sheet_ok = False
+            # 스케줄 시트 반영 후 휴가 시트 동기화
+            for s, rcv, t, va, vb in exchange_pairs:
+                self.sync_vacation_sheet_for_exchange(s, rcv, t, vb, va)
 
             if not sheet_ok:
                 # rollback은 복잡하므로 경고만
@@ -1359,11 +1362,10 @@ class DataManager:
         """
         교환 시 휴가 시트를 동기화한다.
         핵심 원리: 휴가 시트의 셀 값 전체를 그대로 맞교환한다.
-        API 호출 최소화: get_all_values 1회 → 셀 위치 계산 → batch_update 1회
-
-        예) 정수빈 4턴 'IM\\nA-4' ↔ 이규 4턴 'EMC(소아)\\nB-3'
-        → 정수빈 4턴에 'EMC(소아)\\nB-3', 이규 4턴에 'IM\\nA-4' 기록
+        반환: 디버그 메시지 문자열 (UI에 표시용)
         """
+        debug_lines = []
+
         # ── 1단계: vacation_data 메모리 갱신 ──
         v1 = self.vacation_data.get(person1, {})
         v2 = self.vacation_data.get(person2, {})
@@ -1382,27 +1384,33 @@ class DataManager:
             v1[p1_period]['type'] = p2_type
             v2[p2_period]['type'] = p1_type
             self.save_db()
+            debug_lines.append(f"메모리: 양쪽 휴가 교환 ({p1_type}↔{p2_type})")
         elif p1_period and not p2_period:
             vac_info = v1.pop(p1_period)
             if person2 not in self.vacation_data:
                 self.vacation_data[person2] = {}
             self.vacation_data[person2][p1_period] = vac_info
             self.save_db()
+            debug_lines.append(f"메모리: {person1}→{person2} 휴가 이동")
         elif p2_period and not p1_period:
             vac_info = v2.pop(p2_period)
             if person1 not in self.vacation_data:
                 self.vacation_data[person1] = {}
             self.vacation_data[person1][p2_period] = vac_info
             self.save_db()
+            debug_lines.append(f"메모리: {person2}→{person1} 휴가 이동")
+        else:
+            debug_lines.append("메모리: 해당 턴에 휴가 없음")
 
-        # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 (1회 읽기 → 1회 쓰기) ──
+        # ── 2단계: 휴가 시트 셀 값 통째로 맞교환 ──
         if not self.sheet_connected or self.vac_holiday_ws is None:
-            print(f"[VAC_SYNC] 시트 미연결 → 건너뜀")
-            return
+            debug_lines.append("시트 미연결 또는 휴가시트 없음 → 건너뜀")
+            return "\n".join(debug_lines)
 
         try:
             # ① 전체 시트를 한 번만 읽기
             all_rows = self.vac_holiday_ws.get_all_values()
+            debug_lines.append(f"휴가시트 총 {len(all_rows)}행 읽기 완료")
 
             # ② 헤더 행과 턴 컬럼 인덱스 찾기
             header_row_idx = name_col_idx = turn_col_idx = None
@@ -1420,11 +1428,14 @@ class DataManager:
                     break
 
             if header_row_idx is None or turn_col_idx is None:
-                print(f"[VAC_SYNC] 헤더/컬럼 못 찾음: header_row={header_row_idx}, turn_col={turn_col_idx}")
-                print(f"[VAC_SYNC] 헤더 행: {all_rows[header_row_idx] if header_row_idx is not None else 'N/A'}")
-                return
+                headers = all_rows[header_row_idx] if header_row_idx is not None else []
+                debug_lines.append(f"헤더/컬럼 못 찾음! header_row={header_row_idx}, turn_col={turn_col_idx}")
+                debug_lines.append(f"헤더 내용: {headers[:15]}")
+                return "\n".join(debug_lines)
 
-            # ③ person1, person2의 행 인덱스 찾기 (0-based → 1-based for API)
+            debug_lines.append(f"헤더: row={header_row_idx}, 이름col={name_col_idx}, '{turn}'col={turn_col_idx}")
+
+            # ③ person1, person2의 행 인덱스 찾기
             p1_row = p2_row = None
             for r_i in range(header_row_idx + 1, len(all_rows)):
                 if name_col_idx < len(all_rows[r_i]):
@@ -1437,47 +1448,54 @@ class DataManager:
                     break
 
             if p1_row is None or p2_row is None:
-                print(f"[VAC_SYNC] 인턴 못 찾음: {person1}→row={p1_row}, {person2}→row={p2_row}")
-                return
+                debug_lines.append(f"인턴 못 찾음: {person1}→row={p1_row}, {person2}→row={p2_row}")
+                return "\n".join(debug_lines)
 
             # ④ 현재 셀 값 읽기
             cell1_val = all_rows[p1_row][turn_col_idx] if turn_col_idx < len(all_rows[p1_row]) else ''
             cell2_val = all_rows[p2_row][turn_col_idx] if turn_col_idx < len(all_rows[p2_row]) else ''
-            print(f"[VAC_SYNC] 읽기: {person1}[r{p1_row+1}]='{cell1_val}' / {person2}[r{p2_row+1}]='{cell2_val}'")
+            debug_lines.append(f"읽기: {person1}='{cell1_val}' / {person2}='{cell2_val}'")
 
-            # ⑤ 맞교환 쓰기 (gspread API: row/col은 1-based)
+            # ⑤ 맞교환 쓰기
             api_col = turn_col_idx + 1
             api_row1 = p1_row + 1
             api_row2 = p2_row + 1
-
-            # person1 자리에 person2의 원래 값, person2 자리에 person1의 원래 값
             write1 = cell2_val if cell2_val else ""
             write2 = cell1_val if cell1_val else ""
-            print(f"[VAC_SYNC] 쓰기: {person1}[r{api_row1},c{api_col}]←'{write1}' / {person2}[r{api_row2},c{api_col}]←'{write2}'")
+            debug_lines.append(f"쓰기: {person1}←'{write1}' / {person2}←'{write2}'")
 
             self.vac_holiday_ws.update_cell(api_row1, api_col, write1)
             self.vac_holiday_ws.update_cell(api_row2, api_col, write2)
+            debug_lines.append("update_cell 완료")
 
-            # ⑥ 검증: 쓰기 후 다시 읽어서 값이 정상 반영됐는지 확인
+            # ⑥ 검증
             import time
             time.sleep(1)
             verify = self.vac_holiday_ws.get_all_values()
             v1_after = verify[p1_row][turn_col_idx] if turn_col_idx < len(verify[p1_row]) else '?'
             v2_after = verify[p2_row][turn_col_idx] if turn_col_idx < len(verify[p2_row]) else '?'
-            print(f"[VAC_SYNC] 검증: {person1}='{v1_after}' / {person2}='{v2_after}'")
+            debug_lines.append(f"검증: {person1}='{v1_after}' / {person2}='{v2_after}'")
+
             if v1_after != write1 or v2_after != write2:
-                print(f"[VAC_SYNC] ⚠️ 값이 덮어씌워짐! 수식이 있을 수 있음")
-                # 수식 확인 시도
+                debug_lines.append("⚠️ 값이 덮어씌워졌습니다! 수식이 원인일 수 있음")
                 try:
-                    fc1 = self.vac_holiday_ws.acell(f'{chr(64+api_col)}{api_row1}', value_render_option='FORMULA').value
-                    fc2 = self.vac_holiday_ws.acell(f'{chr(64+api_col)}{api_row2}', value_render_option='FORMULA').value
-                    print(f"[VAC_SYNC] 수식확인: {person1}='{fc1}' / {person2}='{fc2}'")
-                except Exception:
-                    pass
+                    from gspread.utils import rowcol_to_a1
+                    a1_1 = rowcol_to_a1(api_row1, api_col)
+                    a1_2 = rowcol_to_a1(api_row2, api_col)
+                    fc1 = self.vac_holiday_ws.acell(a1_1, value_render_option='FORMULA').value
+                    fc2 = self.vac_holiday_ws.acell(a1_2, value_render_option='FORMULA').value
+                    debug_lines.append(f"수식: {person1}='{fc1}' / {person2}='{fc2}'")
+                except Exception as fe:
+                    debug_lines.append(f"수식 확인 실패: {fe}")
+            else:
+                debug_lines.append("검증 OK")
 
         except Exception as e:
-            print(f"[VAC_SYNC] 실패 ({person1}↔{person2}, {turn}): {e}")
-            import traceback; traceback.print_exc()
+            debug_lines.append(f"오류: {e}")
+            import traceback
+            debug_lines.append(traceback.format_exc())
+
+        return "\n".join(debug_lines)
 
     def _get_vacation_cell_value(self, intern_name, turn_key):
         """휴가 시트에서 특정 인턴·턴의 셀 값을 읽는다."""
@@ -1983,7 +2001,6 @@ class DataManager:
             # 교환 실행
             self.df.loc[p1, turn] = val_b
             self.df.loc[p2, turn] = val_a
-            self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
 
             sheet_ok = True
             if self.sheet_connected:
@@ -1996,12 +2013,17 @@ class DataManager:
                 self.df.loc[p2, turn] = val_b
                 return False, "구글 시트 반영 오류. 취소됩니다."
 
+            vac_debug = self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
+
             req['status'] = 'accepted'
             self.save_db()
             self.log_history_to_sheet(p1, p2, turn, val_a, val_b, '관리자승인')
             self.auto_close_market_posts(p1, turn)
             self.auto_close_market_posts(p2, turn)
-            return True, f"✅ 관리자 승인 완료! ({val_a} ↔ {val_b})"
+            result_msg = f"✅ 관리자 승인 완료! ({val_a} ↔ {val_b})"
+            if vac_debug:
+                result_msg += f"\n\n📋 휴가시트:\n```\n{vac_debug}\n```"
+            return True, result_msg
 
         return False, "알 수 없는 동작입니다."
 
@@ -2061,7 +2083,8 @@ class DataManager:
                 self.save_db()
                 return False, "⚠️ 관리자 승인 시점 재검증 실패:\n" + "\n".join(errors)
 
-            # 교환 실행
+            # 교환 실행: 스케줄 시트 먼저 → 휴가 시트 나중에
+            exchange_pairs = []
             for r in chain_reqs:
                 t = r['turn']
                 rcv = r['receiver']
@@ -2069,13 +2092,16 @@ class DataManager:
                 vb = self.df.loc[rcv, t]
                 self.df.loc[sender, t] = vb
                 self.df.loc[rcv, t] = va
-                self.sync_vacation_sheet_for_exchange(sender, rcv, t, vb, va)
+                exchange_pairs.append((sender, rcv, t, va, vb))
                 if self.sheet_connected:
                     self.update_sheet_cell(sender, t, vb)
                     self.update_sheet_cell(rcv, t, va)
                 r['status'] = 'accepted'
                 self.auto_close_market_posts(sender, t)
                 self.auto_close_market_posts(rcv, t)
+            # 스케줄 시트 반영 후 휴가 시트 동기화
+            for s, rcv, t, va, vb in exchange_pairs:
+                self.sync_vacation_sheet_for_exchange(s, rcv, t, vb, va)
 
             self.save_db()
             self.log_history_to_sheet(sender, '', '', '', '', '관리자승인(복합)')
@@ -2153,8 +2179,6 @@ class DataManager:
             # 교환 실행
             self.df.loc[p1, turn] = val_b
             self.df.loc[p2, turn] = val_a
-            # 휴가 데이터 + 시트 동기화 (읽기1회→쓰기1회)
-            self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
 
             sheet_ok = True
             if self.sheet_connected:
@@ -2168,6 +2192,9 @@ class DataManager:
                 self.df.loc[p2, turn] = val_b
                 return False, "구글 시트 반영 오류. 취소됩니다."
 
+            # 휴가 데이터 + 시트 동기화 (스케줄 시트 반영 후 실행)
+            vac_debug = self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
+
             req['status'] = 'accepted'
 
             self.save_db()
@@ -2175,7 +2202,10 @@ class DataManager:
             # 장터 자동 완료 처리
             self.auto_close_market_posts(p1, turn)
             self.auto_close_market_posts(p2, turn)
-            return True, f"✅ 교환 완료! ({val_a} ↔ {val_b})"
+            result_msg = f"✅ 교환 완료! ({val_a} ↔ {val_b})"
+            if vac_debug:
+                result_msg += f"\n\n📋 휴가시트 동기화 상세:\n```\n{vac_debug}\n```"
+            return True, result_msg
 
         return False, "알 수 없는 동작입니다."
 
