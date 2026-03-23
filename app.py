@@ -3260,13 +3260,22 @@ with st.sidebar:
     inbox_chain  = [r for r in mgr.requests
                     if r['receiver'] == user and r['status'] == 'pending' and 'chain_id' in r]
     inbox_sb     = inbox_normal + inbox_chain
+    # 내가 관련된 관리자 승인 대기 요청 (보낸 것 + 받은 것)
+    admin_wait_sb = [r for r in mgr.requests
+                     if r.get('status') == 'admin_pending'
+                     and (r['sender'] == user or r['receiver'] == user)]
     sent_pend_sb = [r for r in mgr.requests
                     if r['sender'] == user and r['status'] in ('pending', 'chain_accepted', 'admin_pending')]
     with st.expander(
-        f"📩 요청 내역  (받은 {len(inbox_sb)} · 보낸 {len(sent_pend_sb)})",
-        expanded=len(inbox_sb) > 0
+        f"📩 요청 내역  (받은 {len(inbox_sb)} · 보낸 {len(sent_pend_sb)}"
+        + (f" · 관리자대기 {len(admin_wait_sb)}" if admin_wait_sb else "") + ")",
+        expanded=len(inbox_sb) > 0 or len(admin_wait_sb) > 0
     ):
-        tab_in, tab_out = st.tabs(["📥 받은 요청", "📤 보낸 요청"])
+        if admin_wait_sb:
+            tab_in, tab_out, tab_adm_wait = st.tabs(["📥 받은 요청", "📤 보낸 요청", "⏳ 관리자 승인 대기"])
+        else:
+            tab_in, tab_out = st.tabs(["📥 받은 요청", "📤 보낸 요청"])
+            tab_adm_wait = None
 
         with tab_in:
             if not inbox_sb:
@@ -3387,6 +3396,38 @@ with st.sidebar:
                                 ok, msg = mgr.cancel_request(r['id'], user)
                                 if ok: st.success(msg); st.rerun()
                                 else:  st.error(msg)
+                    st.divider()
+
+        # ── 관리자 승인 대기 탭 ──
+        if tab_adm_wait is not None:
+            with tab_adm_wait:
+                st.info("⏳ 구미 지역 관련 교환은 상대방 수락 후에도 **관리자 최종 승인**이 필요합니다.")
+                # 체인과 단일 분리
+                shown_adm_chains = set()
+                for r in admin_wait_sb:
+                    cid = r.get('chain_id')
+                    if cid:
+                        if cid in shown_adm_chains:
+                            continue
+                        shown_adm_chains.add(cid)
+                        chain_all = [x for x in mgr.requests if x.get('chain_id') == cid]
+                        role = "신청자" if r['sender'] == user else "수신자"
+                        st.write(f"⏳ **복합 교환** ({len(chain_all)}건) — 나: {role}")
+                        for x in chain_all:
+                            st.caption(
+                                f"  {x['sender']} → {x['receiver']} | {x['turn']} | "
+                                f"`{x.get('val_sender', '?')}` ↔ `{x.get('val_receiver', '?')}`"
+                            )
+                        st.warning("관리자 최종 승인 대기 중입니다.")
+                    else:
+                        role = "신청자" if r['sender'] == user else "수신자"
+                        other = r['receiver'] if r['sender'] == user else r['sender']
+                        st.write(f"⏳ **{r['turn']}** | {r['sender']} ↔ {r['receiver']} — 나: {role}")
+                        st.caption(
+                            f"`{r.get('val_sender', '?')}` ↔ `{r.get('val_receiver', '?')}`  "
+                            f"_{r.get('timestamp', '')[:10]}_"
+                        )
+                        st.warning("관리자 최종 승인 대기 중입니다.")
                     st.divider()
 
     # ── 교환이력 ──────────────────────────────────────────────────────────────
