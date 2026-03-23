@@ -2627,93 +2627,7 @@ if user == 'ADMIN':
             mc5.metric("🚨 휴가제외 각1↑", n_excl_bad)
             st.dataframe(status_df, use_container_width=True, hide_index=True)
 
-            # ── 5) 구미 연속 잔류 현황 (턴 전환별) ────────────────────────────
-            st.divider()
-            st.subheader("📌 구미 연속 잔류 현황")
-            st.caption("각 턴 전환 구간별로 구미에 연속 잔류하는 인턴 명단입니다.")
-
-            # 턴을 숫자 순서대로 정렬
-            turn_cols = sorted(mgr.df.columns, key=lambda c: int(re.sub(r'\D', '', c)) if re.sub(r'\D', '', c) else 0)
-
-            # 각 인턴의 턴별 구미 여부 계산
-            intern_gumi = {}  # {intern: {turn: bool}}
-            for intern in mgr.df.index:
-                intern_gumi[intern] = {}
-                for t in turn_cols:
-                    val = mgr.df.loc[intern, t]
-                    if not val or str(val) in ('None', '', 'nan'):
-                        intern_gumi[intern][t] = False
-                    else:
-                        loc, _ = mgr.parse_cell(val)
-                        intern_gumi[intern][t] = (loc or DEFAULT_LOCATION) == '구미'
-
-            # 턴 전환별 연속 잔류 인턴 목록
-            transition_rows = []
-            for i in range(len(turn_cols) - 1):
-                t_from = turn_cols[i]
-                t_to   = turn_cols[i + 1]
-                staying = []
-                for intern in mgr.df.index:
-                    if intern_gumi[intern][t_from] and intern_gumi[intern][t_to]:
-                        v1 = str(mgr.df.loc[intern, t_from])
-                        v2 = str(mgr.df.loc[intern, t_to])
-                        staying.append(f"{intern}({v1}→{v2})")
-                transition_rows.append({
-                    '턴 전환': f"{t_from} → {t_to}",
-                    '잔류 인원': len(staying),
-                    '잔류 명단': ', '.join(staying) if staying else '-',
-                })
-
-            trans_df = pd.DataFrame(transition_rows)
-            has_any = any(r['잔류 인원'] > 0 for r in transition_rows)
-
-            if has_any:
-                max_stay = max(r['잔류 인원'] for r in transition_rows)
-                total_transitions = sum(1 for r in transition_rows if r['잔류 인원'] > 0)
-                gc1, gc2 = st.columns(2)
-                gc1.metric("연속 잔류 발생 구간 수", f"{total_transitions}개")
-                gc2.metric("최대 동시 잔류 인원", f"{max_stay}명")
-
-            def _highlight_gumi(row):
-                if row['잔류 인원'] > 0:
-                    return ['background-color:#fff3e0'] * len(row)
-                return [''] * len(row)
-
-            st.dataframe(
-                trans_df.style.apply(_highlight_gumi, axis=1),
-                use_container_width=True, hide_index=True,
-                height=min(80 + len(trans_df) * 35, 500)
-            )
-
-            # 인턴별 구미 연속 구간 요약
-            st.markdown("**인턴별 구미 연속 구간 요약**")
-            intern_streak_rows = []
-            for intern in mgr.df.index:
-                current_streak = []
-                streaks = []
-                for t in turn_cols:
-                    if intern_gumi[intern][t]:
-                        current_streak.append(t)
-                    else:
-                        if len(current_streak) >= 2:
-                            streaks.append(current_streak[:])
-                        current_streak = []
-                if len(current_streak) >= 2:
-                    streaks.append(current_streak[:])
-                for streak in streaks:
-                    vals = [str(mgr.df.loc[intern, t]) for t in streak]
-                    intern_streak_rows.append({
-                        '인턴': intern,
-                        '연속 턴 수': len(streak),
-                        '구간': f"{streak[0]}~{streak[-1]}",
-                        '배치': ' → '.join(vals),
-                    })
-            if intern_streak_rows:
-                streak_df = pd.DataFrame(intern_streak_rows).sort_values(
-                    ['연속 턴 수', '인턴'], ascending=[False, True])
-                st.dataframe(streak_df, use_container_width=True, hide_index=True)
-            else:
-                st.success("구미 2턴 이상 연속 잔류 인턴이 없습니다.")
+            # (구미 연속 잔류 현황은 "구미 교환 승인" 탭으로 이동)
 
     # ── 관리자 탭2: 전체 스케줄 ────────────────────────────────────────────────
     with adm_tab2:
@@ -3052,6 +2966,140 @@ if user == 'ADMIN':
     with adm_tab9:
         st.subheader("구미 교환 관리자 승인")
         st.caption("구미 지역이 포함된 교환은 상대방 수락 후에도 관리자 최종 승인이 필요합니다.")
+
+        # ════════════════════════════════════════════════════════════════
+        # 구미 연속 잔류 현황 (항상 표시)
+        # ════════════════════════════════════════════════════════════════
+        st.markdown("---")
+        st.subheader("📌 구미 연속 잔류 현황")
+
+        _gumi_turn_cols = sorted(
+            mgr.df.columns,
+            key=lambda c: int(re.sub(r'\D', '', c)) if re.sub(r'\D', '', c) else 0
+        )
+
+        # 각 인턴의 턴별 구미 여부
+        _g_intern_map = {}
+        for _gi in mgr.df.index:
+            _g_intern_map[_gi] = {}
+            for _gt in _gumi_turn_cols:
+                _gv = mgr.df.loc[_gi, _gt]
+                if _gv and str(_gv) not in ('None', '', 'nan'):
+                    _gl, _ = mgr.parse_cell(_gv)
+                    _g_intern_map[_gi][_gt] = (_gl or DEFAULT_LOCATION) == '구미'
+                else:
+                    _g_intern_map[_gi][_gt] = False
+
+        # 1) 인턴별 구미 배치 총괄표
+        st.markdown("**인턴별 구미 배치 총괄**")
+        _gumi_overview_rows = []
+        for _gi in mgr.df.index:
+            _g_turns = [_gt for _gt in _gumi_turn_cols if _g_intern_map[_gi][_gt]]
+            if _g_turns:
+                _g_vals = [str(mgr.df.loc[_gi, _gt]) for _gt in _g_turns]
+                _gumi_overview_rows.append({
+                    '인턴': _gi,
+                    '구미 턴 수': len(_g_turns),
+                    '구미 턴': ', '.join(_g_turns),
+                    '배치 과목': ', '.join(_g_vals),
+                })
+        if _gumi_overview_rows:
+            _gov_df = pd.DataFrame(_gumi_overview_rows).sort_values('구미 턴 수', ascending=False)
+            _gm1, _gm2 = st.columns(2)
+            _gm1.metric("구미 배치 인턴 수", f"{len(_gumi_overview_rows)}명")
+            _gm2.metric("총 구미 배치 건수", f"{sum(r['구미 턴 수'] for r in _gumi_overview_rows)}건")
+            st.dataframe(_gov_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("구미 배치 인턴이 없습니다.")
+
+        # 2) 턴 전환별 연속 잔류 인턴
+        st.markdown("---")
+        st.markdown("**턴 전환별 연속 잔류 인턴**")
+        st.caption("연속된 두 턴 모두 구미에 배치된 인턴 목록입니다.")
+
+        _g_trans_rows = []
+        for _gi_idx in range(len(_gumi_turn_cols) - 1):
+            _gt_from = _gumi_turn_cols[_gi_idx]
+            _gt_to   = _gumi_turn_cols[_gi_idx + 1]
+            _g_staying = []
+            for _gi in mgr.df.index:
+                if _g_intern_map[_gi][_gt_from] and _g_intern_map[_gi][_gt_to]:
+                    _gv1 = str(mgr.df.loc[_gi, _gt_from])
+                    _gv2 = str(mgr.df.loc[_gi, _gt_to])
+                    _g_staying.append(f"{_gi}({_gv1}→{_gv2})")
+            _g_trans_rows.append({
+                '턴 전환': f"{_gt_from} → {_gt_to}",
+                '잔류 인원': len(_g_staying),
+                '잔류 명단': ', '.join(_g_staying) if _g_staying else '-',
+            })
+
+        _g_trans_df = pd.DataFrame(_g_trans_rows)
+        _g_has_any = any(r['잔류 인원'] > 0 for r in _g_trans_rows)
+
+        if _g_has_any:
+            _g_max = max(r['잔류 인원'] for r in _g_trans_rows)
+            _g_cnt = sum(1 for r in _g_trans_rows if r['잔류 인원'] > 0)
+            _gtm1, _gtm2 = st.columns(2)
+            _gtm1.metric("연속 잔류 발생 구간", f"{_g_cnt}개")
+            _gtm2.metric("최대 동시 잔류 인원", f"{_g_max}명")
+
+        def _hl_gumi(row):
+            if row['잔류 인원'] > 0:
+                return ['background-color:#fff3e0'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(
+            _g_trans_df.style.apply(_hl_gumi, axis=1),
+            use_container_width=True, hide_index=True,
+            height=min(80 + len(_g_trans_df) * 35, 500)
+        )
+
+        # 3) 인턴별 연속 구간 요약 (2턴 이상 연속)
+        st.markdown("---")
+        st.markdown("**인턴별 구미 연속 구간 상세**")
+        st.caption("2턴 이상 연속으로 구미에 잔류하는 인턴의 상세 구간입니다.")
+
+        _g_streak_rows = []
+        for _gi in mgr.df.index:
+            _cur_streak = []
+            _all_streaks = []
+            for _gt in _gumi_turn_cols:
+                if _g_intern_map[_gi][_gt]:
+                    _cur_streak.append(_gt)
+                else:
+                    if len(_cur_streak) >= 2:
+                        _all_streaks.append(_cur_streak[:])
+                    _cur_streak = []
+            if len(_cur_streak) >= 2:
+                _all_streaks.append(_cur_streak[:])
+
+            for _streak in _all_streaks:
+                _s_vals = [str(mgr.df.loc[_gi, _st]) for _st in _streak]
+                _g_streak_rows.append({
+                    '인턴': _gi,
+                    '연속 턴 수': len(_streak),
+                    '구간': f"{_streak[0]} ~ {_streak[-1]}",
+                    '상세': ' → '.join(f"{_st}({_sv})" for _st, _sv in zip(_streak, _s_vals)),
+                })
+
+        if _g_streak_rows:
+            _gs_df = pd.DataFrame(_g_streak_rows).sort_values(
+                ['연속 턴 수', '인턴'], ascending=[False, True])
+            _gs_total = len(_g_streak_rows)
+            _gs_max = max(r['연속 턴 수'] for r in _g_streak_rows)
+            _gsm1, _gsm2, _gsm3 = st.columns(3)
+            _gsm1.metric("연속 잔류 인턴 수", f"{len(set(r['인턴'] for r in _g_streak_rows))}명")
+            _gsm2.metric("연속 구간 수", f"{_gs_total}개")
+            _gsm3.metric("최장 연속", f"{_gs_max}턴")
+            st.dataframe(_gs_df, use_container_width=True, hide_index=True)
+        else:
+            st.success("구미 2턴 이상 연속 잔류 인턴이 없습니다.")
+
+        # ════════════════════════════════════════════════════════════════
+        # 승인 대기 교환 목록
+        # ════════════════════════════════════════════════════════════════
+        st.markdown("---")
+        st.subheader("📋 승인 대기 교환")
 
         # admin_pending 상태 요청 수집
         admin_pending_reqs = [r for r in mgr.requests if r.get('status') == 'admin_pending']
