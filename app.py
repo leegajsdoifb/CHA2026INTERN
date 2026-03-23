@@ -1214,13 +1214,11 @@ class DataManager:
                 val_b = self.df.loc[r['receiver'], _turn]
                 self.df.loc[sender, r['turn']] = val_b
                 self.df.loc[r['receiver'], r['turn']] = val_a
-                # 휴가 시트 동기화
-                self.swap_vacation_data(sender, r['receiver'], r['turn'])
+                # 휴가 데이터 + 시트 동기화 (읽기1회→쓰기1회)
+                self.sync_vacation_sheet_for_exchange(sender, r['receiver'], r['turn'], val_b, val_a)
                 if self.sheet_connected:
                     ok1 = self.update_sheet_cell(sender, r['turn'], val_b)
                     ok2 = self.update_sheet_cell(r['receiver'], r['turn'], val_a)
-                    self.update_vacation_dept_only(sender, r['turn'], val_b)
-                    self.update_vacation_dept_only(r['receiver'], r['turn'], val_a)
                     if not (ok1 and ok2):
                         sheet_ok = False
 
@@ -1352,45 +1350,29 @@ class DataManager:
             print(f"휴가 시트 업데이트 실패 ({intern_name}): {e}")
             return False
 
-    def update_vacation_dept_only(self, intern_name, turn_key, new_dept_value):
+    def sync_vacation_sheet_for_exchange(self, person1, person2, turn, new_val_p1, new_val_p2):
         """
-        휴가 시트에서 과목명만 교환하고, 기존 휴가 표시(B-4 등)는 보존한다.
-        예: 기존 'IM\\nB-4' + new_dept_value='GS(구미)' → 'GS(구미)\\nB-4'
+        교환 시 휴가 시트를 한 번에 동기화한다.
+        1) 휴가 셀을 한 번 읽어서 마커(B-4 등) 추출
+        2) 양쪽 모두 휴가인 경우 타입(A/B/C) 교환 처리
+        3) 과목값 교환 + 마커 보존하여 최종 셀 값을 한 번만 쓴다.
+
+        new_val_p1: person1이 받게 될 새 과목값 (스케줄 시트 기준)
+        new_val_p2: person2가 받게 될 새 과목값 (스케줄 시트 기준)
         """
-        if not self.sheet_connected or self.vac_holiday_ws is None:
-            return False
-        try:
-            # 현재 셀 값 읽기
-            current = self._get_vacation_cell_value(intern_name, turn_key)
+        vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
 
-            # 기존 셀에서 휴가 표시 추출
-            vac_marker = None
-            if current:
-                vac_pattern = re.compile(r'^[A-Za-z]-?\d+$')
-                for line in current.split('\n'):
-                    if vac_pattern.match(line.strip()):
-                        vac_marker = line.strip()
-                        break
+        def _extract_marker(cell_val):
+            if not cell_val:
+                return None
+            for line in cell_val.split('\n'):
+                if vac_pattern.match(line.strip()):
+                    return line.strip()
+            return None
 
-            # 새 값: 과목명 + 기존 휴가 표시 보존
-            final = new_dept_value if new_dept_value else ''
-            if vac_marker and final:
-                final = f"{final}\n{vac_marker}"
-
-            return self.update_vacation_sheet_cell(intern_name, turn_key, final)
-        except Exception as e:
-            print(f"휴가 시트 과목 업데이트 실패 ({intern_name}): {e}")
-            return False
-
-    def swap_vacation_data(self, person1, person2, turn):
-        """
-        두 사람의 해당 턴 휴가 데이터를 교환한다.
-        둘 다 이 턴에 휴가가 있는 경우에만 동작 (vacation_data + 휴가 시트).
-        """
+        # ── 1단계: vacation_data 메모리 갱신 (둘 다 휴가인 경우 타입 교환) ──
         v1 = self.vacation_data.get(person1, {})
         v2 = self.vacation_data.get(person2, {})
-
-        # 각 사람이 해당 turn에 가진 휴가 찾기
         p1_period = p2_period = None
         for period in ('1차', '2차'):
             vi = v1.get(period)
@@ -1400,30 +1382,50 @@ class DataManager:
             if vi and vi.get('turn') == turn:
                 p2_period = period
 
-        if not p1_period or not p2_period:
-            return  # 둘 다 휴가가 아니면 교환할 것 없음
+        if p1_period and p2_period:
+            # 둘 다 휴가 → 타입 교환
+            p1_type = v1[p1_period]['type']
+            p2_type = v2[p2_period]['type']
+            v1[p1_period]['type'] = p2_type
+            v2[p2_period]['type'] = p1_type
+            self.save_db()
 
-        # 타입 교환
-        p1_type = v1[p1_period]['type']
-        p2_type = v2[p2_period]['type']
-        v1[p1_period]['type'] = p2_type
-        v2[p2_period]['type'] = p1_type
-        self.save_db()
+        # ── 2단계: 휴가 시트 갱신 (읽기 1회 → 계산 → 쓰기 1회) ──
+        if not self.sheet_connected or self.vac_holiday_ws is None:
+            return
 
-        # 휴가 시트에도 반영 (셀 전체 값: "IM\nA-3" 형태)
-        if self.sheet_connected and self.vac_holiday_ws:
-            try:
-                # 현재 셀 값 읽기
-                cell1 = self._get_vacation_cell_value(person1, turn)
-                cell2 = self._get_vacation_cell_value(person2, turn)
-                if cell1 and cell2:
-                    # 타입 부분만 교환
-                    new_cell1 = self._replace_vac_type_in_cell(cell1, p1_type, p2_type)
-                    new_cell2 = self._replace_vac_type_in_cell(cell2, p2_type, p1_type)
-                    self.update_vacation_sheet_cell(person1, turn, new_cell1)
-                    self.update_vacation_sheet_cell(person2, turn, new_cell2)
-            except Exception as e:
-                print(f"휴가 시트 교환 반영 실패: {e}")
+        try:
+            # 셀 값 한 번만 읽기
+            cell1_raw = self._get_vacation_cell_value(person1, turn)
+            cell2_raw = self._get_vacation_cell_value(person2, turn)
+
+            marker1 = _extract_marker(cell1_raw)  # person1의 기존 마커
+            marker2 = _extract_marker(cell2_raw)  # person2의 기존 마커
+
+            # 둘 다 휴가인 경우: 마커도 교환 (타입 교환 반영)
+            if p1_period and p2_period and marker1 and marker2:
+                # person1은 person2의 타입을 받고, person2는 person1의 타입을 받음
+                final_marker1 = marker2  # person2의 원래 마커 → person1에게
+                final_marker2 = marker1  # person1의 원래 마커 → person2에게
+            else:
+                # 한쪽만 또는 양쪽 모두 비휴가 → 각자의 마커 유지
+                final_marker1 = marker1
+                final_marker2 = marker2
+
+            # 최종 셀 값: 새 과목 + 마커
+            final1 = new_val_p1 or ''
+            if final_marker1 and final1:
+                final1 = f"{final1}\n{final_marker1}"
+
+            final2 = new_val_p2 or ''
+            if final_marker2 and final2:
+                final2 = f"{final2}\n{final_marker2}"
+
+            # 한 번만 쓰기
+            self.update_vacation_sheet_cell(person1, turn, final1)
+            self.update_vacation_sheet_cell(person2, turn, final2)
+        except Exception as e:
+            print(f"휴가 시트 동기화 실패 ({person1}↔{person2}, {turn}): {e}")
 
     def _get_vacation_cell_value(self, intern_name, turn_key):
         """휴가 시트에서 특정 인턴·턴의 셀 값을 읽는다."""
@@ -1925,14 +1927,12 @@ class DataManager:
             # 교환 실행
             self.df.loc[p1, turn] = val_b
             self.df.loc[p2, turn] = val_a
-            self.swap_vacation_data(p1, p2, turn)
+            self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
 
             sheet_ok = True
             if self.sheet_connected:
                 ok1 = self.update_sheet_cell(p1, turn, val_b)
                 ok2 = self.update_sheet_cell(p2, turn, val_a)
-                self.update_vacation_dept_only(p1, turn, val_b)
-                self.update_vacation_dept_only(p2, turn, val_a)
                 sheet_ok = ok1 and ok2
 
             if not sheet_ok:
@@ -2013,12 +2013,10 @@ class DataManager:
                 vb = self.df.loc[rcv, t]
                 self.df.loc[sender, t] = vb
                 self.df.loc[rcv, t] = va
-                self.swap_vacation_data(sender, rcv, t)
+                self.sync_vacation_sheet_for_exchange(sender, rcv, t, vb, va)
                 if self.sheet_connected:
                     self.update_sheet_cell(sender, t, vb)
                     self.update_sheet_cell(rcv, t, va)
-                    self.update_vacation_dept_only(sender, t, vb)
-                    self.update_vacation_dept_only(rcv, t, va)
                 r['status'] = 'accepted'
                 self.auto_close_market_posts(sender, t)
                 self.auto_close_market_posts(rcv, t)
@@ -2099,17 +2097,14 @@ class DataManager:
             # 교환 실행
             self.df.loc[p1, turn] = val_b
             self.df.loc[p2, turn] = val_a
-            # 휴가 시트 동기화 (타입 교환 + 과목 값 교환)
-            self.swap_vacation_data(p1, p2, turn)
+            # 휴가 데이터 + 시트 동기화 (읽기1회→쓰기1회)
+            self.sync_vacation_sheet_for_exchange(p1, p2, turn, val_b, val_a)
 
             sheet_ok = True
             if self.sheet_connected:
                 with st.spinner('구글 시트에 반영 중입니다...'):
                     ok1 = self.update_sheet_cell(p1, turn, val_b)
                     ok2 = self.update_sheet_cell(p2, turn, val_a)
-                    # 휴가 시트에도 과목 값 교환 (휴가 표시 보존)
-                    self.update_vacation_dept_only(p1, turn, val_b)
-                    self.update_vacation_dept_only(p2, turn, val_a)
                     sheet_ok = ok1 and ok2
 
             if not sheet_ok:

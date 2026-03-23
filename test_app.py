@@ -734,20 +734,20 @@ class TestSwapVacationData(unittest.TestCase):
 
     def test_both_have_vacation_swapped(self):
         """A(4턴 A-3)↔D(4턴 D-3): 타입 교환."""
-        self.dm.swap_vacation_data('A', 'D', '4턴')
+        self.dm.sync_vacation_sheet_for_exchange('A', 'D', '4턴', 'x', 'y')
         self.assertEqual(self.dm.vacation_data['A']['1차']['type'], 'D-3')
         self.assertEqual(self.dm.vacation_data['D']['1차']['type'], 'A-3')
 
     def test_one_missing_no_swap(self):
         """A(4턴 휴가)↔B(4턴 비휴가): 교환 없음."""
         orig_a = self.dm.vacation_data['A']['1차']['type']
-        self.dm.swap_vacation_data('A', 'B', '4턴')
+        self.dm.sync_vacation_sheet_for_exchange('A', 'B', '4턴', 'x', 'y')
         self.assertEqual(self.dm.vacation_data['A']['1차']['type'], orig_a)
 
     def test_neither_has_vacation_no_swap(self):
         """비휴가 턴: 아무 변화 없음."""
         orig_a = copy.deepcopy(self.dm.vacation_data['A'])
-        self.dm.swap_vacation_data('A', 'B', '3턴')
+        self.dm.sync_vacation_sheet_for_exchange('A', 'B', '3턴', 'x', 'y')
         self.assertEqual(self.dm.vacation_data['A'], orig_a)
 
 
@@ -1209,7 +1209,7 @@ class TestVacationComplexScenarios(unittest.TestCase):
         dm = make_dm()
         a_type_before = dm.vacation_data['A']['1차']['type']
         d_type_before = dm.vacation_data['D']['1차']['type']
-        dm.swap_vacation_data('A', 'D', '4턴')
+        dm.sync_vacation_sheet_for_exchange('A', 'D', '4턴', 'x', 'y')
         self.assertEqual(dm.vacation_data['A']['1차']['type'], d_type_before)
         self.assertEqual(dm.vacation_data['D']['1차']['type'], a_type_before)
         # turn은 변경되지 않아야 함
