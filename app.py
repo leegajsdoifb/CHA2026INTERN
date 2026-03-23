@@ -1904,6 +1904,47 @@ class DataManager:
                 return True
         return False
 
+    def analyze_gumi_streaks(self, swap_pairs=None):
+        """
+        구미 연속 근무 분석.
+        swap_pairs: [(person1, person2, turn), ...] 교환이 실행된다고 가정할 쌍 목록.
+                    None이면 현재 상태만 분석.
+        Returns: {intern: [{'turns': [t1,t2,...], 'vals': [v1,v2,...]}]}
+        """
+        turn_cols = sorted(
+            self.df.columns,
+            key=lambda c: int(re.sub(r'\D', '', c)) if re.sub(r'\D', '', c) else 0
+        )
+
+        # 시뮬레이션용 임시 스케줄 생성
+        if swap_pairs:
+            sim = {intern: {t: self.df.loc[intern, t] for t in turn_cols} for intern in self.df.index}
+            for p1, p2, turn in swap_pairs:
+                if p1 in sim and p2 in sim and turn in turn_cols:
+                    sim[p1][turn], sim[p2][turn] = sim[p2][turn], sim[p1][turn]
+        else:
+            sim = {intern: {t: self.df.loc[intern, t] for t in turn_cols} for intern in self.df.index}
+
+        result = {}
+        for intern in self.df.index:
+            streaks = []
+            current = []
+            for t in turn_cols:
+                val = sim[intern][t]
+                if val and str(val) not in ('None', '', 'nan'):
+                    loc, _ = self.parse_cell(val)
+                    if (loc or DEFAULT_LOCATION) == '구미':
+                        current.append((t, str(val)))
+                        continue
+                if len(current) >= 2:
+                    streaks.append({'turns': [c[0] for c in current], 'vals': [c[1] for c in current]})
+                current = []
+            if len(current) >= 2:
+                streaks.append({'turns': [c[0] for c in current], 'vals': [c[1] for c in current]})
+            if streaks:
+                result[intern] = streaks
+        return result
+
     # ── 관리자 최종 승인/거절 (구미 교환) ────────────────────────────────────────
     def admin_approve_request(self, req_id, action):
         """admin_pending 상태의 요청을 관리자가 최종 처리"""
@@ -3051,6 +3092,48 @@ if user == 'ADMIN':
                             st.write(f"**메시지**: {r['message']}")
                         st.write(f"**신청 시각**: {r.get('timestamp','')}")
 
+                        # ── 구미 연속 근무 영향 분석 ──
+                        _swap = [(r['sender'], r['receiver'], r['turn'])]
+                        _cur_streaks = mgr.analyze_gumi_streaks()
+                        _aft_streaks = mgr.analyze_gumi_streaks(swap_pairs=_swap)
+                        _involved = {r['sender'], r['receiver']}
+
+                        st.markdown("---")
+                        st.markdown("**📊 구미 연속 근무 영향 분석**")
+                        _gc1, _gc2 = st.columns(2)
+                        with _gc1:
+                            st.markdown("**현재 상태**")
+                            _has_cur = False
+                            for _nm in sorted(_involved):
+                                if _nm in _cur_streaks:
+                                    for _s in _cur_streaks[_nm]:
+                                        st.caption(f"• {_nm}: {' → '.join(_s['turns'])} ({len(_s['turns'])}연속)")
+                                        _has_cur = True
+                            if not _has_cur:
+                                st.caption("관련자 구미 연속 근무 없음")
+                        with _gc2:
+                            st.markdown("**승인 후 예상**")
+                            _has_aft = False
+                            for _nm in sorted(_involved):
+                                if _nm in _aft_streaks:
+                                    for _s in _aft_streaks[_nm]:
+                                        _is_new = _nm not in _cur_streaks or _s['turns'] not in [x['turns'] for x in _cur_streaks.get(_nm, [])]
+                                        _marker = " 🆕" if _is_new else ""
+                                        st.caption(f"• {_nm}: {' → '.join(_s['turns'])} ({len(_s['turns'])}연속){_marker}")
+                                        _has_aft = True
+                            if not _has_aft:
+                                st.caption("관련자 구미 연속 근무 없음 ✅")
+
+                        # 전체 변화 요약
+                        _all_cur_cnt = sum(len(v) for v in _cur_streaks.values())
+                        _all_aft_cnt = sum(len(v) for v in _aft_streaks.values())
+                        if _all_aft_cnt > _all_cur_cnt:
+                            st.warning(f"⚠️ 승인 시 전체 연속 근무 구간: {_all_cur_cnt} → {_all_aft_cnt}개 (증가)")
+                        elif _all_aft_cnt < _all_cur_cnt:
+                            st.success(f"✅ 승인 시 전체 연속 근무 구간: {_all_cur_cnt} → {_all_aft_cnt}개 (감소)")
+                        else:
+                            st.info(f"ℹ️ 승인 시 전체 연속 근무 구간: {_all_cur_cnt} → {_all_aft_cnt}개 (변동 없음)")
+
                         bc1, bc2 = st.columns(2)
                         with bc1:
                             if st.button("✅ 승인", key=f"adm_approve_{r['id']}", type="primary",
@@ -3084,6 +3167,50 @@ if user == 'ADMIN':
                         if reqs[0].get('message'):
                             st.write(f"**메시지**: {reqs[0]['message']}")
                         st.write(f"**신청 시각**: {reqs[0].get('timestamp','')}")
+
+                        # ── 구미 연속 근무 영향 분석 (복합) ──
+                        _ch_swaps = [(r['sender'], r['receiver'], r['turn']) for r in reqs]
+                        _ch_cur = mgr.analyze_gumi_streaks()
+                        _ch_aft = mgr.analyze_gumi_streaks(swap_pairs=_ch_swaps)
+                        _ch_involved = set()
+                        for r in reqs:
+                            _ch_involved.add(r['sender'])
+                            _ch_involved.add(r['receiver'])
+
+                        st.markdown("---")
+                        st.markdown("**📊 구미 연속 근무 영향 분석**")
+                        _chc1, _chc2 = st.columns(2)
+                        with _chc1:
+                            st.markdown("**현재 상태**")
+                            _ch_has_cur = False
+                            for _nm in sorted(_ch_involved):
+                                if _nm in _ch_cur:
+                                    for _s in _ch_cur[_nm]:
+                                        st.caption(f"• {_nm}: {' → '.join(_s['turns'])} ({len(_s['turns'])}연속)")
+                                        _ch_has_cur = True
+                            if not _ch_has_cur:
+                                st.caption("관련자 구미 연속 근무 없음")
+                        with _chc2:
+                            st.markdown("**승인 후 예상**")
+                            _ch_has_aft = False
+                            for _nm in sorted(_ch_involved):
+                                if _nm in _ch_aft:
+                                    for _s in _ch_aft[_nm]:
+                                        _ch_is_new = _nm not in _ch_cur or _s['turns'] not in [x['turns'] for x in _ch_cur.get(_nm, [])]
+                                        _ch_marker = " 🆕" if _ch_is_new else ""
+                                        st.caption(f"• {_nm}: {' → '.join(_s['turns'])} ({len(_s['turns'])}연속){_ch_marker}")
+                                        _ch_has_aft = True
+                            if not _ch_has_aft:
+                                st.caption("관련자 구미 연속 근무 없음 ✅")
+
+                        _ch_all_cur = sum(len(v) for v in _ch_cur.values())
+                        _ch_all_aft = sum(len(v) for v in _ch_aft.values())
+                        if _ch_all_aft > _ch_all_cur:
+                            st.warning(f"⚠️ 승인 시 전체 연속 근무 구간: {_ch_all_cur} → {_ch_all_aft}개 (증가)")
+                        elif _ch_all_aft < _ch_all_cur:
+                            st.success(f"✅ 승인 시 전체 연속 근무 구간: {_ch_all_cur} → {_ch_all_aft}개 (감소)")
+                        else:
+                            st.info(f"ℹ️ 승인 시 전체 연속 근무 구간: {_ch_all_cur} → {_ch_all_aft}개 (변동 없음)")
 
                         cc1, cc2 = st.columns(2)
                         with cc1:
