@@ -67,7 +67,10 @@ class DataManager:
         self.passwords   = {}
         self.market_posts = []
         self.vacation_data = {}   # {이름: {'1차': {'turn':X,'type':Y}, '2차': {'turn':X,'type':Y}}}
-        self.admin_settings = {}  # 관리자 설정 (진로선택 차단은 하드코딩)
+        self.admin_settings = {
+            'exchange_paused': False,       # 교환 일시 중단 여부
+            'exchange_pause_reason': '',    # 중단 사유
+        }
         self.connect_google_sheet()
         self.load_db()
 
@@ -376,6 +379,9 @@ class DataManager:
         give_val  : give_turn이 특정 턴일 때의 현재 값 (아무턴이면 '')
         want_dept : 받고싶은 턴 (예: '3턴, 5턴') 또는 '무관'
         """
+        if self.admin_settings.get('exchange_paused'):
+            reason = self.admin_settings.get('exchange_pause_reason', '')
+            return False, f"⛔ 현재 교환이 일시 중단되었습니다.{(' (사유: ' + reason + ')') if reason else ''}"
         if not self.sheet_connected or self.market_ws is None:
             return False, "장터 시트에 접근할 수 없습니다."
         # 중복 등록 방지: 같은 사람이 같은 턴으로 이미 활성 게시물이 있으면 차단
@@ -893,6 +899,9 @@ class DataManager:
         모든 상대방이 수락해야만 일괄 실행.
         messages: {receiver: msg} 상대방별 개별 메시지 (있으면 message보다 우선)
         """
+        if self.admin_settings.get('exchange_paused'):
+            reason = self.admin_settings.get('exchange_pause_reason', '')
+            return False, f"⛔ 현재 교환이 일시 중단되었습니다.{(' (사유: ' + reason + ')') if reason else ''}"
         chain_id = now_kst().strftime("%Y%m%d%H%M%S%f")[:17]
         created_reqs = []
 
@@ -1114,6 +1123,10 @@ class DataManager:
         req = next((r for r in chain_reqs if r['id'] == req_id), None)
         if not req:
             return False, "요청을 찾을 수 없습니다."
+        # 교환 일시 중단 시 수락 불가 (거절은 허용)
+        if action == 'accept' and self.admin_settings.get('exchange_paused'):
+            reason = self.admin_settings.get('exchange_pause_reason', '')
+            return False, f"⛔ 현재 교환이 일시 중단되었습니다.{(' (사유: ' + reason + ')') if reason else ''}"
         if req['status'] != 'pending':
             return False, f"이미 처리된 요청입니다 ({req['status']})."
 
@@ -1475,13 +1488,17 @@ class DataManager:
 
     # ── DB 로드 / 저장 ─────────────────────────────────────────────────────────
     def refresh_requests_from_db(self):
-        """JSON 파일에서 requests만 빠르게 재로드 (다른 세션이 추가한 요청 반영)"""
+        """JSON 파일에서 requests + admin_settings를 빠르게 재로드"""
         if not os.path.exists(DB_FILE):
             return
         try:
             with open(DB_FILE, 'r', encoding='utf-8') as f:
                 db = json.load(f)
             self.requests = db.get('requests', [])
+            saved_settings = db.get('admin_settings', {})
+            for k in list(self.admin_settings.keys()):
+                if k in saved_settings:
+                    self.admin_settings[k] = saved_settings[k]
         except Exception as e:
             logging.error(f"requests refresh failed: {e}")
 
@@ -1831,6 +1848,9 @@ class DataManager:
 
     # ── 교환 요청 (신청 시점 검증) ────────────────────────────────────────────
     def add_request(self, sender, receiver, turn, message=''):
+        if self.admin_settings.get('exchange_paused'):
+            reason = self.admin_settings.get('exchange_pause_reason', '')
+            return False, f"⛔ 현재 교환이 일시 중단되었습니다.{(' (사유: ' + reason + ')') if reason else ''}"
         if turn in LOCKED_TURNS:
             return False, f"⛔ {turn}은(는) 교환이 불가능한 턴입니다."
 
@@ -2126,6 +2146,11 @@ class DataManager:
         req = next((r for r in self.requests if r['id'] == req_id), None)
         if not req:
             return False, "요청을 찾을 수 없습니다."
+
+        # 교환 일시 중단 시 수락 불가 (거절은 허용)
+        if action == 'accept' and self.admin_settings.get('exchange_paused'):
+            reason = self.admin_settings.get('exchange_pause_reason', '')
+            return False, f"⛔ 현재 교환이 일시 중단되었습니다.{(' (사유: ' + reason + ')') if reason else ''}"
 
         # 이미 처리된 요청은 재처리 불가
         if req.get('status') != 'pending':
@@ -3275,6 +3300,32 @@ if user == 'ADMIN':
     with adm_tab8:
         st.subheader("데이터 관리")
 
+        # ── 교환 일시 중단 ──
+        st.markdown("#### ⏸️ 교환 일시 중단")
+        st.caption("중단 시 신규 신청·수락·장터 등록이 불가능하며, 스케줄 열람만 가능합니다.")
+
+        _is_paused = mgr.admin_settings.get('exchange_paused', False)
+        _cur_reason = mgr.admin_settings.get('exchange_pause_reason', '')
+
+        if _is_paused:
+            st.error(f"🔴 **현재 교환 중단 중** — 사유: {_cur_reason if _cur_reason else '(없음)'}")
+            if st.button("▶️ 교환 재개", key="adm_resume_exchange", type="primary", use_container_width=True):
+                mgr.admin_settings['exchange_paused'] = False
+                mgr.admin_settings['exchange_pause_reason'] = ''
+                mgr.save_db()
+                st.toast("교환이 재개되었습니다.", icon="✅")
+                st.rerun()
+        else:
+            st.success("🟢 **교환 정상 운영 중**")
+            _pause_reason = st.text_input("중단 사유", placeholder="예: 스케줄 조정 중, 관리자 확인 필요 등", key="adm_pause_reason")
+            if st.button("⏸️ 교환 중단", key="adm_pause_exchange", use_container_width=True):
+                mgr.admin_settings['exchange_paused'] = True
+                mgr.admin_settings['exchange_pause_reason'] = _pause_reason.strip()
+                mgr.save_db()
+                st.toast("교환이 일시 중단되었습니다.", icon="⏸️")
+                st.rerun()
+
+        st.markdown("---")
         st.markdown("#### 교환 요청 · 이력 전체 초기화")
         st.caption("모든 교환 요청(대기/승인/거절 포함)과 교환이력 시트를 일괄 삭제합니다.")
 
@@ -3900,6 +3951,12 @@ elif st.session_state.multi_confirm is not None:
     multi_confirm_dialog()
 
 # ──────────────────────────────────────────────────────────────────────────────
+# ── 교환 일시 중단 배너 ──
+_paused = mgr.admin_settings.get('exchange_paused', False)
+if _paused:
+    _p_reason = mgr.admin_settings.get('exchange_pause_reason', '')
+    st.error(f"⏸️ **교환이 일시 중단되었습니다.** 현재 스케줄 열람만 가능합니다.{('  사유: ' + _p_reason) if _p_reason else ''}")
+
 # ① 교환 신청
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("📤 교환 신청")
