@@ -2390,8 +2390,11 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'analyze_gumi_streaks'):
+_MGR_VERSION = 4  # 코드 업데이트 시 +1 → 세션 자동 재생성
+if ('manager' not in st.session_state
+    or getattr(st.session_state.manager, '_version', 0) < _MGR_VERSION):
     st.session_state.manager = DataManager()
+    st.session_state.manager._version = _MGR_VERSION
 mgr = st.session_state.manager
 # 매 렌더링마다 다른 세션이 추가한 요청을 반영
 mgr.refresh_requests_from_db()
@@ -3979,8 +3982,6 @@ st.subheader("📤 교환 신청")
 # 교환 중단 시 신청 폼 차단
 if _paused:
     st.warning("⏸️ 교환이 일시 중단되어 신규 신청이 불가능합니다. 스케줄 열람만 가능합니다.")
-else:
-    pass  # 아래 교환 신청 폼 정상 표시
 
 avail_turns = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
 # 진로선택 턴 제외: 사용자의 해당 턴 값에 '진로선택'이 포함된 턴은 교환 불가
