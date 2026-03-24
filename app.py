@@ -2390,7 +2390,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'refresh_requests_from_db'):
+if 'manager' not in st.session_state or not hasattr(st.session_state.manager, 'analyze_gumi_streaks'):
     st.session_state.manager = DataManager()
 mgr = st.session_state.manager
 # 매 렌더링마다 다른 세션이 추가한 요청을 반영
@@ -3482,9 +3482,12 @@ with st.sidebar:
                         st.info(f"💬 {req['message']}")
                     if mgr._involves_gumi(snd_v, my_v):
                         st.caption("구미 교환 — 수락 후 관리자 최종 승인 필요")
+                    _sb_paused = mgr.admin_settings.get('exchange_paused', False)
+                    if _sb_paused:
+                        st.warning("⏸️ 교환 일시 중단 — 수락 불가")
                     ca, cb = st.columns(2)
                     if ca.button("✅ 수락", key=f"sb_acc_{req['id']}", type="primary",
-                                 use_container_width=True):
+                                 use_container_width=True, disabled=_sb_paused):
                         succ, msg = mgr.process_request(req['id'], 'accept')
                         st.toast(msg, icon="✅" if succ else "❌")
                         st.rerun()
@@ -3515,11 +3518,14 @@ with st.sidebar:
                         st.write(f"  • **{_ch_tlbl}**: `{snd_v}` ↔ 나: `{my_v}`")
                         if req.get('message'):
                             st.caption(f"&nbsp;&nbsp;&nbsp;&nbsp;💬 {req['message']}")
+                    _sb_ch_paused = mgr.admin_settings.get('exchange_paused', False)
+                    if _sb_ch_paused:
+                        st.warning("⏸️ 교환 일시 중단 — 수락 불가")
                     ca, cb = st.columns(2)
                     # 체인은 내게 해당하는 건만 일괄 수락/거절
                     my_chain_reqs = [r for r in reqs if r['status'] == 'pending']
                     if ca.button("✅ 수락", key=f"sb_chacc_{cid}", type="primary",
-                                 use_container_width=True):
+                                 use_container_width=True, disabled=_sb_ch_paused):
                         last_succ, last_msg = False, ""
                         for r in my_chain_reqs:
                             last_succ, last_msg = mgr.process_chain_action(cid, r['id'], 'accept', user)
@@ -3835,16 +3841,17 @@ with st.sidebar:
                         )
                     st.caption("\n".join(lines))
                     if st.button(f"🔗 일괄 요청 ({len(swaps)}건)", key=f"chain_req_{idx}",
-                                 type="primary", use_container_width=True):
-                        swap_data = [{'receiver': s['partner'], 'turn': s['turn']} for s in swaps]
-                        with st.spinner("복합 교환 요청 중..."):
-                            mgr.load_db()
-                            ok, msg = mgr.add_chain_request(user, swap_data)
-                        if ok:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
+                                 type="primary", use_container_width=True,
+                                 disabled=_paused):
+                        # 다이얼로그로 전환하여 메시지 입력 기회 제공
+                        confirm_items = []
+                        for s in swaps:
+                            confirm_items.append({
+                                'target': s['partner'], 'turn': s['turn'],
+                                'my_val': s['my_val'], 'partner_val': s['partner_val']
+                            })
+                        st.session_state.multi_confirm = confirm_items
+                        st.rerun()
                     st.divider()
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3871,13 +3878,17 @@ def quick_confirm_dialog():
     # 구미 포함 시 관리자 승인 필요 고지
     if mgr._involves_gumi(qc.get('my_val', ''), qc.get('partner_val', '')):
         st.warning("**구미 지역 교환** — 상대방 수락 후 **관리자 최종 승인**이 필요합니다.")
+    _dlg_paused = mgr.admin_settings.get('exchange_paused', False)
+    if _dlg_paused:
+        _dlg_reason = mgr.admin_settings.get('exchange_pause_reason', '')
+        st.error(f"⏸️ 교환이 일시 중단되었습니다.{('  사유: ' + _dlg_reason) if _dlg_reason else ''}")
     qc_message = st.text_input(
         "요청 메시지 (선택)", placeholder="교환 사유, 연락처 등",
         key="qc_dlg_msg", max_chars=100
     )
     qc_c1, qc_c2 = st.columns(2)
     if qc_c1.button("✅ 요청 보내기", key="qc_dlg_yes",
-                    type="primary", use_container_width=True):
+                    type="primary", use_container_width=True, disabled=_dlg_paused):
         with st.spinner("최신 데이터 확인 중..."):
             mgr.load_db()
         succ, result_msg = mgr.add_request(
@@ -3885,9 +3896,9 @@ def quick_confirm_dialog():
         st.session_state.quick_confirm = None
         if succ:
             st.success(result_msg)
+            st.rerun()
         else:
             st.error(result_msg)
-        st.rerun()
     if qc_c2.button("❌ 취소", key="qc_dlg_no", use_container_width=True):
         st.session_state.quick_confirm = None
         st.rerun()
@@ -3908,6 +3919,10 @@ def multi_confirm_dialog():
     )
     if _has_gumi_in_multi:
         st.warning("**구미 지역 교환 포함** — 전원 수락 후 **관리자 최종 승인**이 필요합니다.")
+    _mc_paused = mgr.admin_settings.get('exchange_paused', False)
+    if _mc_paused:
+        _mc_reason = mgr.admin_settings.get('exchange_pause_reason', '')
+        st.error(f"⏸️ 교환이 일시 중단되었습니다.{('  사유: ' + _mc_reason) if _mc_reason else ''}")
     # 각 항목 표시 + 상대방별 메시지 입력
     mc_messages = {}
     for i, it in enumerate(items):
@@ -3918,7 +3933,7 @@ def multi_confirm_dialog():
             placeholder="교환 사유, 연락처 등",
             max_chars=100, key=f"mc_msg_{i}")
     col_yes, col_no = st.columns(2)
-    if col_yes.button("✅ 요청 보내기", type="primary", use_container_width=True):
+    if col_yes.button("✅ 요청 보내기", type="primary", use_container_width=True, disabled=_mc_paused):
         with st.spinner("최신 데이터 확인 및 재검증 중..."):
             mgr.load_db()
             exchanges = [{'target': it['target'], 'turn': it['turn']} for it in items]
@@ -3937,9 +3952,9 @@ def multi_confirm_dialog():
             st.session_state.exchange_items = []
             if succ:
                 st.success(msg)
+                st.rerun()
             else:
                 st.error(msg)
-            st.rerun()
     if col_no.button("❌ 취소", use_container_width=True):
         st.session_state.multi_confirm = None
         st.rerun()
@@ -3960,6 +3975,13 @@ if _paused:
 # ① 교환 신청
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("📤 교환 신청")
+
+# 교환 중단 시 신청 폼 차단
+if _paused:
+    st.warning("⏸️ 교환이 일시 중단되어 신규 신청이 불가능합니다. 스케줄 열람만 가능합니다.")
+else:
+    pass  # 아래 교환 신청 폼 정상 표시
+
 avail_turns = [c for c in mgr.df.columns if c not in LOCKED_TURNS]
 # 진로선택 턴 제외: 사용자의 해당 턴 값에 '진로선택'이 포함된 턴은 교환 불가
 if user in mgr.df.index:
@@ -4165,7 +4187,7 @@ if col_add.button("➕ 항목 추가", key="ei_add", disabled=not can_send):
         st.rerun()
 
 if col_send.button("📨 요청 보내기", type="primary", use_container_width=True,
-                   disabled=not can_send):
+                   disabled=(not can_send or _paused)):
         confirm_items = []
         for it in st.session_state.exchange_items:
             mv = mgr.df.loc[user,       it['turn']] if user         in mgr.df.index else '?'
