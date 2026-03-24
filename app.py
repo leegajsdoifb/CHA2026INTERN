@@ -3842,7 +3842,7 @@ with st.sidebar:
                     st.caption("\n".join(lines))
                     if st.button(f"🔗 일괄 요청 ({len(swaps)}건)", key=f"chain_req_{idx}",
                                  type="primary", use_container_width=True,
-                                 disabled=_paused):
+                                 disabled=mgr.admin_settings.get('exchange_paused', False)):
                         # 다이얼로그로 전환하여 메시지 입력 기회 제공
                         confirm_items = []
                         for s in swaps:
