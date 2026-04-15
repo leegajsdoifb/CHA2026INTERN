@@ -715,7 +715,9 @@ class DataManager:
                 _, d_pt = self.parse_cell(partner_val)
                 if d_my in ('진로선택', '진로탐색') or d_pt in ('진로선택', '진로탐색'):
                     continue
-                if d_pt != target_dept:
+                # target_dept도 parse_cell로 dept 추출 (예: 'IM(구미)' → 'IM')
+                _, d_target = self.parse_cell(target_dept)
+                if d_pt != d_target:
                     continue
                 # 교환 검증
                 sa = self.df.loc[name].copy()
