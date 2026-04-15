@@ -2686,8 +2686,9 @@ if user == 'ADMIN':
                     "background-color:#e8d5f5;color:#222;" if (row.name, c) in _adm_vac_cells else ""
                     for c in row.index
                 ]
+            _adm_display_df = mgr.df.replace(r'^진로탐색\(.+\)$', '진로탐색', regex=True)
             st.dataframe(
-                mgr.df.style.apply(_adm_style_table, axis=1),
+                _adm_display_df.style.apply(_adm_style_table, axis=1),
                 use_container_width=True, height=600
             )
             st.caption("🟪 연보라 음영 = 휴가 턴")
@@ -4221,6 +4222,8 @@ highlight_pairs = ({(user, it['turn']) for it in st.session_state.exchange_items
 
 remain     = [x for x in mgr.df.index if x != user and x not in sel_targets]
 display_df = mgr.df.reindex([user] + sel_targets + remain)
+# 진로탐색(~~) → 진로탐색 으로 표시 정규화
+display_df = display_df.replace(r'^진로탐색\(.+\)$', '진로탐색', regex=True)
 
 # 전체 인원의 휴가 턴 쌍 집합 {(name, turn)} — 음영 표시용
 _vac_cells = set()
