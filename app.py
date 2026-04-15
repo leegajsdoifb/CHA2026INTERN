@@ -1585,8 +1585,19 @@ class DataManager:
             content = match.group(1)
             if content in LOCATIONS:
                 return content, cell_str.replace(f'({content})', '').strip()
-            return DEFAULT_LOCATION, cell_str
-        return DEFAULT_LOCATION, cell_str.strip()
+            # 괄호 안이 지역이 아닌 경우 (예: 진로탐색(내과)) → 기본 과목명으로 정규화
+            dept = cell_str
+            if dept.startswith('진로탐색'):
+                dept = '진로탐색'
+            elif dept.startswith('진로선택'):
+                dept = '진로선택'
+            return DEFAULT_LOCATION, dept
+        dept = cell_str.strip()
+        if dept.startswith('진로탐색'):
+            dept = '진로탐색'
+        elif dept.startswith('진로선택'):
+            dept = '진로선택'
+        return DEFAULT_LOCATION, dept
 
     def validate_intern(self, intern_name, temp_schedule=None):
         if temp_schedule is None:
@@ -2390,7 +2401,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-_MGR_VERSION = 4  # 코드 업데이트 시 +1 → 세션 자동 재생성
+_MGR_VERSION = 5  # 코드 업데이트 시 +1 → 세션 자동 재생성
 if ('manager' not in st.session_state
     or getattr(st.session_state.manager, '_version', 0) < _MGR_VERSION):
     st.session_state.manager = DataManager()
@@ -2675,8 +2686,9 @@ if user == 'ADMIN':
                     "background-color:#e8d5f5;color:#222;" if (row.name, c) in _adm_vac_cells else ""
                     for c in row.index
                 ]
+            _adm_display_df = mgr.df.replace(r'^진로탐색\(.+\)$', '진로탐색', regex=True)
             st.dataframe(
-                mgr.df.style.apply(_adm_style_table, axis=1),
+                _adm_display_df.style.apply(_adm_style_table, axis=1),
                 use_container_width=True, height=600
             )
             st.caption("🟪 연보라 음영 = 휴가 턴")
@@ -4210,6 +4222,8 @@ highlight_pairs = ({(user, it['turn']) for it in st.session_state.exchange_items
 
 remain     = [x for x in mgr.df.index if x != user and x not in sel_targets]
 display_df = mgr.df.reindex([user] + sel_targets + remain)
+# 진로탐색(~~) → 진로탐색 으로 표시 정규화
+display_df = display_df.replace(r'^진로탐색\(.+\)$', '진로탐색', regex=True)
 
 # 전체 인원의 휴가 턴 쌍 집합 {(name, turn)} — 음영 표시용
 _vac_cells = set()
