@@ -1585,8 +1585,19 @@ class DataManager:
             content = match.group(1)
             if content in LOCATIONS:
                 return content, cell_str.replace(f'({content})', '').strip()
-            return DEFAULT_LOCATION, cell_str
-        return DEFAULT_LOCATION, cell_str.strip()
+            # 괄호 안이 지역이 아닌 경우 (예: 진로탐색(내과)) → 기본 과목명으로 정규화
+            dept = cell_str
+            if dept.startswith('진로탐색'):
+                dept = '진로탐색'
+            elif dept.startswith('진로선택'):
+                dept = '진로선택'
+            return DEFAULT_LOCATION, dept
+        dept = cell_str.strip()
+        if dept.startswith('진로탐색'):
+            dept = '진로탐색'
+        elif dept.startswith('진로선택'):
+            dept = '진로선택'
+        return DEFAULT_LOCATION, dept
 
     def validate_intern(self, intern_name, temp_schedule=None):
         if temp_schedule is None:
@@ -2390,7 +2401,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-_MGR_VERSION = 4  # 코드 업데이트 시 +1 → 세션 자동 재생성
+_MGR_VERSION = 5  # 코드 업데이트 시 +1 → 세션 자동 재생성
 if ('manager' not in st.session_state
     or getattr(st.session_state.manager, '_version', 0) < _MGR_VERSION):
     st.session_state.manager = DataManager()
