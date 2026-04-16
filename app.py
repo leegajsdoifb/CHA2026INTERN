@@ -927,11 +927,12 @@ class DataManager:
             if dept_a in ('진로선택', '진로탐색') or dept_b in ('진로선택', '진로탐색'):
                 return False, f"⛔ {turn}: {dept_a if dept_a in ('진로선택','진로탐색') else dept_b}은(는) 교환이 불가능합니다."
 
-            # 중복 체크
+            # 동일 sender→receiver 중복 신청만 차단
             for req in self.requests:
                 if (req['sender'] == sender and req['receiver'] == receiver
-                        and req['turn'] == turn and req['status'] == 'pending'):
-                    return False, f"{turn} → {receiver}: 이미 대기 중인 요청이 있습니다."
+                        and req['turn'] == turn
+                        and req['status'] in ('pending', 'admin_pending')):
+                    return False, f"{turn} → {receiver}: 이미 동일한 요청이 대기 중입니다."
 
             created_reqs.append({
                 "id":           now_kst().strftime("%Y%m%d%H%M%S%f")[:17] + str(len(created_reqs)),
@@ -1867,17 +1868,15 @@ class DataManager:
         if turn in LOCKED_TURNS:
             return False, f"⛔ {turn}은(는) 교환이 불가능한 턴입니다."
 
-        for req in self.requests:
-            if req['status'] != 'pending':
-                continue
-            if req['turn'] != turn:
-                continue
-            involved = {req['sender'], req['receiver']}
-            if sender in involved or receiver in involved:
-                return False, f"이미 {turn}에 대기 중인 교환 요청이 있습니다."
-
         if sender not in self.df.index or receiver not in self.df.index:
             return False, "명단에서 인턴을 찾을 수 없습니다."
+
+        # 동일 sender→receiver 중복 신청만 차단 (타인의 신청은 허용)
+        for req in self.requests:
+            if (req['sender'] == sender and req['receiver'] == receiver
+                    and req['turn'] == turn
+                    and req['status'] in ('pending', 'admin_pending')):
+                return False, f"이미 {receiver}에게 {turn} 교환 요청을 보냈습니다."
 
         val_a = self.df.loc[sender, turn]
         val_b = self.df.loc[receiver, turn]
@@ -3723,15 +3722,13 @@ with st.sidebar:
                             f"`{r['partner_val']}`" +
                             (f"  ⚠️ {' / '.join(r['reasons'])}" if r['reasons'] else "")
                         )
-                        if r['valid'] and not r['has_pending']:
+                        if r['valid']:
                             if col_b.button("요청", key=f"sbsim1_{r['partner']}_{sim_turn}", type="primary"):
                                 st.session_state.quick_confirm = {
                                     'receiver': r['partner'], 'turn': sim_turn,
                                     'my_val': sim_my_val, 'partner_val': r['partner_val'],
                                 }
                                 st.rerun()
-                        elif r['has_pending']:
-                            col_b.caption("⏳")
 
     elif sim_mode == "🎯 특정 턴 받기":
         st.caption("받고 싶은 과목을 선택하면 해당 과목을 받을 수 있는 모든 조합을 탐색합니다.")
@@ -3774,15 +3771,13 @@ with st.sidebar:
                         col_a.caption(f"나: `{r['my_val']}` → 받을 턴: `{r['partner_val']}`")
                         if r['reasons']:
                             col_a.caption(f"⚠️ {' / '.join(r['reasons'])}")
-                        if r['valid'] and not r['has_pending']:
+                        if r['valid']:
                             if col_b.button("요청", key=f"sbsim2_{r['partner']}_{r['turn']}", type="primary"):
                                 st.session_state.quick_confirm = {
                                     'receiver': r['partner'], 'turn': r['turn'],
                                     'my_val': r['my_val'], 'partner_val': r['partner_val'],
                                 }
                                 st.rerun()
-                        elif r['has_pending']:
-                            col_b.caption("⏳")
 
     else:  # 🔗 복합 교환 탐색
         st.caption("단독 교환이 안 되는 경우, 여러 턴을 동시에 교환하는 조합을 찾습니다.")
@@ -4336,7 +4331,7 @@ with tab_browse:
                             if reasons:
                                 st.caption(f"⚠️ {' / '.join(reasons)}")
                         with col_b:
-                            if is_valid and not has_pend:
+                            if is_valid:
                                 if st.button("요청", key=f"mkt_{post_id}_{t}", type="primary"):
                                     my_v_here = (mgr.df.loc[user, t]
                                                  if user in mgr.df.index and t in mgr.df.columns else '')
@@ -4345,8 +4340,6 @@ with tab_browse:
                                         'my_val': my_v_here, 'partner_val': p_val,
                                     }
                                     st.rerun()
-                            elif has_pend:
-                                st.caption("⏳")
                             elif not is_valid:
                                 if st.button("🔍", key=f"mktc_{mkt_key}",
                                              help="복합 교환으로 가능한 조합 탐색"):
